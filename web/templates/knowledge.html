@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>知识库管理 - 税务Agent</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; background: #f5f7fa; min-height: 100vh; }
+        header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
+        header h1 { font-size: 20px; font-weight: 600; }
+        nav a { color: white; text-decoration: none; margin-left: 20px; font-size: 14px; opacity: 0.9; }
+        nav a:hover { opacity: 1; }
+        .container { max-width: 900px; margin: 32px auto; padding: 0 24px; }
+        .card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); margin-bottom: 24px; }
+        .card h2 { font-size: 16px; margin-bottom: 16px; color: #303133; }
+        .upload-area { border: 2px dashed #dcdfe6; border-radius: 8px; padding: 40px; text-align: center; cursor: pointer; transition: all 0.2s; }
+        .upload-area:hover { border-color: #667eea; background: #f5f7fa; }
+        .upload-area.dragover { border-color: #667eea; background: #ecf5ff; }
+        .upload-icon { font-size: 48px; margin-bottom: 12px; }
+        .upload-text { color: #606266; margin-bottom: 8px; }
+        .upload-hint { color: #909399; font-size: 12px; }
+        #file-input { display: none; }
+        .file-list { margin-top: 16px; }
+        .file-item { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-bottom: 1px solid #f0f0f0; }
+        .file-item:last-child { border-bottom: none; }
+        .file-name { color: #303133; font-size: 14px; }
+        .file-status { font-size: 12px; padding: 4px 10px; border-radius: 12px; }
+        .status-pending { background: #fdf6ec; color: #e6a23c; }
+        .status-success { background: #f0f9eb; color: #67c23a; }
+        .status-error { background: #fef0f0; color: #f56c6c; }
+        .pipeline-info { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+        .pipeline-step { padding: 6px 12px; background: #ecf5ff; color: #667eea; border-radius: 6px; font-size: 12px; }
+        .empty-state { text-align: center; padding: 24px; color: #909399; }
+        .delete-btn { background: #fef0f0; color: #f56c6c; border: 1px solid #fbc4c4; padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; margin-left: 8px; }
+        .delete-btn:hover { background: #f56c6c; color: white; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>知识库管理</h1>
+        <nav>
+            <a href="/">对话</a>
+            <a href="/knowledge">知识库</a>
+            <a href="/training">训练</a>
+        </nav>
+    </header>
+    <div class="container">
+        <div class="card">
+            <h2>知识库</h2>
+            <div style="display:flex; gap:8px; margin-bottom:12px;">
+                <input id="kb-name" placeholder="新知识库名称" style="flex:1; padding:8px; border:1px solid #dcdfe6; border-radius:6px;">
+                <button onclick="createDatabase()" style="padding:8px 16px; background:#667eea; color:white; border:none; border-radius:6px; cursor:pointer;">新建知识库</button>
+            </div>
+            <div id="kb-list" style="font-size:13px; color:#606266;">加载中...</div>
+        </div>
+        <div class="card">
+            <h2>上传税务文档到知识库</h2>
+            <div class="upload-area" id="upload-area">
+                <div class="upload-icon">📄</div>
+                <div class="upload-text">点击或拖拽文件到此处上传</div>
+                <div class="upload-hint">支持 PDF / DOCX / XLSX / TXT / MD / CSV 等格式</div>
+                <input type="file" id="file-input" multiple>
+            </div>
+            <div class="pipeline-info">
+                <span class="pipeline-step">1. 保存文件</span>
+                <span class="pipeline-step">2. 文档解析</span>
+                <span class="pipeline-step">3. 文本分块</span>
+                <span class="pipeline-step">4. 向量化</span>
+                <span class="pipeline-step">5. 存入Qdrant</span>
+            </div>
+        </div>
+        <div class="card">
+            <h2>已上传文件</h2>
+            <div class="file-list" id="file-list">
+                <div class="empty-state">暂无文件，上传后将显示在这里</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const uploadArea = document.getElementById('upload-area');
+        const fileInput = document.getElementById('file-input');
+        const fileList = document.getElementById('file-list');
+        // 与后端 main.py 鉴权逻辑对齐
+        const AUTH_TOKEN = 'Bearer test_token_123';
+
+        uploadArea.onclick = () => fileInput.click();
+        uploadArea.ondragover = e => { e.preventDefault(); uploadArea.classList.add('dragover'); };
+        uploadArea.ondragleave = () => uploadArea.classList.remove('dragover');
+        uploadArea.ondrop = e => { e.preventDefault(); uploadArea.classList.remove('dragover'); handleFiles(e.dataTransfer.files); };
+        fileInput.onchange = e => handleFiles(e.target.files);
+
+        async function loadFileList() {
+            try {
+                const resp = await fetch('/api/knowledge/files', {
+                    headers: { 'Authorization': AUTH_TOKEN },
+                });
+                const data = await resp.json();
+                if (data.success && data.files.length > 0) {
+                    fileList.innerHTML = '';
+                    data.files.forEach(f => {
+                        addFileItem(f.file_id, f.file_name || f.file_path, 'success', true);
+                    });
+                }
+            } catch (err) {
+                console.error('加载文件列表失败:', err);
+            }
+        }
+
+        async function deleteFile(fileId, btn) {
+            if (!confirm('确定要删除该文件吗？此操作将同时清除向量库中的内容和磁盘文件。')) return;
+            btn.textContent = '删除中...';
+            btn.disabled = true;
+            try {
+                const resp = await fetch('/api/knowledge/files/' + fileId, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': AUTH_TOKEN },
+                });
+                if (resp.ok) {
+                    const item = document.getElementById('file-' + fileId);
+                    if (item) item.remove();
+                    if (fileList.children.length === 0) {
+                        fileList.innerHTML = '<div class="empty-state">暂无文件，上传后将显示在这里</div>';
+                    }
+                } else {
+                    const err = await resp.json();
+                    alert('删除失败: ' + (err.detail || '未知错误'));
+                    btn.textContent = '删除';
+                    btn.disabled = false;
+                }
+            } catch (err) {
+                alert('删除失败: ' + err.message);
+                btn.textContent = '删除';
+                btn.disabled = false;
+            }
+        }
+
+        async function handleFiles(files) {
+            for (const file of files) {
+                const tempId = 'temp_' + Date.now() + '_' + file.name;
+                addFileItem(tempId, file.name, 'pending', false);
+                const formData = new FormData();
+                formData.append('file', file);
+                try {
+                    const resp = await fetch('/api/knowledge/upload', {
+                        method: 'POST',
+                        headers: { 'Authorization': AUTH_TOKEN },
+                        body: formData,
+                    });
+                    const data = await resp.json();
+                    if (data.status === 'success') {
+                        document.getElementById('file-' + tempId)?.remove();
+                        addFileItem(data.file_id, file.name, 'success', true);
+                    } else {
+                        updateFileItem(tempId, 'error', data.message);
+                    }
+                } catch (err) {
+                    updateFileItem(tempId, 'error', err.message);
+                }
+            }
+            fileInput.value = '';
+        }
+
+        function addFileItem(id, name, status, showDelete) {
+            const empty = fileList.querySelector('.empty-state');
+            if (empty) empty.remove();
+            const div = document.createElement('div');
+            div.className = 'file-item';
+            div.id = 'file-' + id;
+            const statusText = status === 'pending' ? '待处理' : status === 'success' ? '已入库' : '失败';
+            div.innerHTML = `<span class="file-name">${name}</span><span style="display:flex;align-items:center;gap:8px;"><span class="file-status status-${status}">${statusText}</span>${showDelete ? '<button class="delete-btn" onclick="deleteFile(\'' + id + '\', this)">删除</button>' : ''}</span>`;
+            fileList.appendChild(div);
+        }
+
+        function updateFileItem(id, status, msg) {
+            const item = document.getElementById('file-' + id);
+            if (!item) return;
+            const statusEl = item.querySelector('.file-status');
+            statusEl.className = 'file-status status-' + status;
+            statusEl.textContent = msg || status;
+        }
+
+        async function loadDatabases() {
+            try {
+                const resp = await fetch('/api/knowledge/databases', { headers: { 'Authorization': AUTH_TOKEN } });
+                const data = await resp.json();
+                const list = document.getElementById('kb-list');
+                const dbs = data.databases || [];
+                if (dbs.length === 0) { list.textContent = '暂无知识库'; return; }
+                list.innerHTML = dbs.map(kb =>
+                    `<div style="padding:6px 0; border-bottom:1px solid #f0f0f0;">${kb.name || kb.kb_id} <span style="color:#909399;font-size:12px;">（${kb.kb_type}）</span></div>`
+                ).join('');
+            } catch (e) {
+                document.getElementById('kb-list').textContent = '加载失败';
+            }
+        }
+
+        async function createDatabase() {
+            const name = document.getElementById('kb-name').value.trim();
+            if (!name) { alert('请输入知识库名称'); return; }
+            try {
+                const resp = await fetch('/api/knowledge/databases', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': AUTH_TOKEN },
+                    body: JSON.stringify({ name }),
+                });
+                const data = await resp.json();
+                if (resp.ok && data.success) {
+                    document.getElementById('kb-name').value = '';
+                    loadDatabases();
+                } else {
+                    alert('创建失败: ' + (data.detail || '未知错误'));
+                }
+            } catch (e) {
+                alert('创建失败: ' + e.message);
+            }
+        }
+
+        loadDatabases();
+        loadFileList();
+    </script>
+</body>
+</html>

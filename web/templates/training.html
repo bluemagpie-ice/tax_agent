@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>训练测试 - 税务Agent</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; background: #f5f7fa; min-height: 100vh; }
+        header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
+        header h1 { font-size: 20px; font-weight: 600; }
+        nav a { color: white; text-decoration: none; margin-left: 20px; font-size: 14px; opacity: 0.9; }
+        nav a:hover { opacity: 1; }
+        .container { max-width: 900px; margin: 32px auto; padding: 0 24px; }
+        .card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); margin-bottom: 24px; }
+        .card h2 { font-size: 16px; margin-bottom: 16px; color: #303133; }
+        .test-input { display: flex; gap: 12px; margin-bottom: 16px; }
+        .test-input input { flex: 1; padding: 10px 14px; border: 1px solid #dcdfe6; border-radius: 8px; font-size: 14px; outline: none; }
+        .test-input input:focus { border-color: #667eea; }
+        .test-input button { padding: 0 20px; background: #667eea; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; }
+        .test-input button:hover { background: #5a6fd8; }
+        .result-box { background: #f5f7fa; border-radius: 8px; padding: 16px; font-family: 'Consolas', monospace; font-size: 13px; white-space: pre-wrap; max-height: 300px; overflow-y: auto; }
+        .test-cases { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+        .test-case { padding: 12px; background: #ecf5ff; border: 1px solid #d9ecff; border-radius: 8px; cursor: pointer; font-size: 13px; transition: all 0.2s; }
+        .test-case:hover { background: #667eea; color: white; border-color: #667eea; }
+        .api-list { list-style: none; }
+        .api-list li { padding: 10px 14px; background: #f5f7fa; border-radius: 6px; margin-bottom: 8px; font-family: 'Consolas', monospace; font-size: 13px; }
+        .method { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-right: 8px; }
+        .method.get { background: #e1f3d8; color: #67c23a; }
+        .method.post { background: #fda79a; color: #f56c6c; }
+        .method.path { color: #606266; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>训练与测试</h1>
+        <nav>
+            <a href="/">对话</a>
+            <a href="/knowledge">知识库</a>
+            <a href="/training">训练</a>
+        </nav>
+    </header>
+    <div class="container">
+        <div class="card">
+            <h2>快速测试</h2>
+            <div class="test-input">
+                <input type="text" id="test-query" placeholder="输入测试查询，例如：小规模纳税人增值税税率是多少？">
+                <button onclick="runTest()">测试</button>
+            </div>
+            <div class="result-box" id="test-result">等待测试...</div>
+        </div>
+        <div class="card">
+            <h2>预设测试用例</h2>
+            <div class="test-cases" id="test-cases"></div>
+        </div>
+        <div class="card">
+            <h2>API 接口列表</h2>
+            <ul class="api-list">
+                <li><span class="method get">GET</span><span class="method path">/</span> 首页</li>
+                <li><span class="method get">GET</span><span class="method path">/knowledge</span> 知识库管理</li>
+                <li><span class="method get">GET</span><span class="method path">/training</span> 训练测试</li>
+                <li><span class="method post">POST</span><span class="method path">/api/chat</span> 核心对话接口</li>
+                <li><span class="method get">GET</span><span class="method path">/api/skills</span> 技能列表</li>
+                <li><span class="method post">POST</span><span class="method path">/api/agent</span> Agent 调用</li>
+                <li><span class="method get">GET</span><span class="method path">/api/search</span> 全文搜索</li>
+                <li><span class="method post">POST</span><span class="method path">/api/knowledge/upload</span> 文件上传</li>
+                <li><span class="method get">GET</span><span class="method path">/api/memory</span> 用户记忆</li>
+            </ul>
+        </div>
+
+        <!-- 政策自动更新管理面板 -->
+        <div class="card">
+            <h2>政策自动更新</h2>
+            <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                <span class="method get">GET</span><span class="method path">/api/policy/*</span>
+                <span id="policy-scheduler-status" style="font-size:13px;color:#909399;">加载中...</span>
+                <button onclick="triggerPolicyUpdate()" style="margin-left:auto; padding:8px 16px; background:#67c23a; color:white; border:none; border-radius:6px; cursor:pointer;">触发更新扫描</button>
+            </div>
+            <div id="policy-update-msg" style="font-size:12px; color:#909399; margin-bottom:12px;"></div>
+        </div>
+
+        <div class="card">
+            <h2>政策源管理</h2>
+            <div style="display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap;">
+                <select id="src-type" style="padding:8px;"><option value="local">本地目录</option><option value="http">HTTP 抓取</option></select>
+                <input id="src-dir" placeholder="目录路径 或 URL" style="flex:1; padding:8px; border:1px solid #dcdfe6; border-radius:6px;">
+                <input id="src-id" placeholder="来源ID" style="width:120px; padding:8px; border:1px solid #dcdfe6; border-radius:6px;">
+                <input id="src-cat" placeholder="分类" style="width:100px; padding:8px; border:1px solid #dcdfe6; border-radius:6px;">
+                <button onclick="addPolicySource()" style="padding:8px 16px; background:#667eea; color:white; border:none; border-radius:6px; cursor:pointer;">添加源</button>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:#f5f7fa;"><th style="padding:8px;text-align:left;">类型</th><th style="padding:8px;text-align:left;">来源ID</th><th style="padding:8px;text-align:left;">路径/URL</th><th style="padding:8px;text-align:left;">分类</th><th style="padding:8px;">操作</th></tr></thead>
+                <tbody id="policy-sources-tbody"><tr><td colspan="5" style="padding:12px;color:#909399;">加载中...</td></tr></tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>更新报告历史</h2>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:#f5f7fa;"><th style="padding:8px;text-align:left;">时间</th><th style="padding:8px;">扫描</th><th style="padding:8px;">新增</th><th style="padding:8px;">变更</th><th style="padding:8px;">入库</th><th style="padding:8px;">重复</th><th style="padding:8px;">失败</th></tr></thead>
+                <tbody id="policy-reports-tbody"><tr><td colspan="7" style="padding:12px;color:#909399;">加载中...</td></tr></tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>政策变更检测</h2>
+            <button onclick="loadChanges()" style="padding:8px 16px; background:#e6a23c; color:white; border:none; border-radius:6px; cursor:pointer; margin-bottom:12px;">刷新变更列表</button>
+            <div id="policy-changes-list" style="font-size:13px; color:#909399;">点击上方按钮加载...</div>
+        </div>
+
+        <!-- 政策自动更新管理面板 -->
+        <div class="card">
+            <h2>政策自动更新</h2>
+            <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                <span class="method get">GET</span><span class="method path">/api/policy/*</span>
+                <span id="policy-scheduler-status" style="font-size:13px;color:#909399;">加载中...</span>
+                <button onclick="triggerPolicyUpdate()" style="margin-left:auto; padding:8px 16px; background:#67c23a; color:white; border:none; border-radius:6px; cursor:pointer;">触发更新扫描</button>
+            </div>
+            <div id="policy-update-msg" style="font-size:12px; color:#909399; margin-bottom:12px;"></div>
+        </div>
+
+        <div class="card">
+            <h2>政策源管理</h2>
+            <div style="display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap;">
+                <select id="src-type" style="padding:8px;"><option value="local">本地目录</option><option value="http">HTTP 抓取</option></select>
+                <input id="src-dir" placeholder="目录路径 或 URL" style="flex:1; padding:8px; border:1px solid #dcdfe6; border-radius:6px;">
+                <input id="src-id" placeholder="来源ID" style="width:120px; padding:8px; border:1px solid #dcdfe6; border-radius:6px;">
+                <input id="src-cat" placeholder="分类" style="width:100px; padding:8px; border:1px solid #dcdfe6; border-radius:6px;">
+                <button onclick="addPolicySource()" style="padding:8px 16px; background:#667eea; color:white; border:none; border-radius:6px; cursor:pointer;">添加源</button>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:#f5f7fa;"><th style="padding:8px;text-align:left;">类型</th><th style="padding:8px;text-align:left;">来源ID</th><th style="padding:8px;text-align:left;">路径/URL</th><th style="padding:8px;text-align:left;">分类</th><th style="padding:8px;">操作</th></tr></thead>
+                <tbody id="policy-sources-tbody"><tr><td colspan="5" style="padding:12px;color:#909399;">加载中...</td></tr></tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>更新报告历史</h2>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:#f5f7fa;"><th style="padding:8px;text-align:left;">时间</th><th style="padding:8px;">扫描</th><th style="padding:8px;">新增</th><th style="padding:8px;">变更</th><th style="padding:8px;">入库</th><th style="padding:8px;">重复</th><th style="padding:8px;">失败</th></tr></thead>
+                <tbody id="policy-reports-tbody"><tr><td colspan="7" style="padding:12px;color:#909399;">加载中...</td></tr></tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>政策变更检测</h2>
+            <button onclick="loadChanges()" style="padding:8px 16px; background:#e6a23c; color:white; border:none; border-radius:6px; cursor:pointer; margin-bottom:12px;">刷新变更列表</button>
+            <div id="policy-changes-list" style="font-size:13px; color:#909399;">点击上方按钮加载...</div>
+        </div>
+
+        <!-- 政策自动更新管理面板 -->
+        <div class="card">
+            <h2>政策自动更新</h2>
+            <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                <span class="method get">GET</span><span class="method path">/api/policy/*</span>
+                <span id="policy-scheduler-status" style="font-size:13px;color:#909399;">加载中...</span>
+                <button onclick="triggerPolicyUpdate()" style="margin-left:auto; padding:8px 16px; background:#67c23a; color:white; border:none; border-radius:6px; cursor:pointer;">触发更新扫描</button>
+            </div>
+            <div id="policy-update-msg" style="font-size:12px; color:#909399; margin-bottom:12px;"></div>
+        </div>
+
+        <div class="card">
+            <h2>政策源管理</h2>
+            <div style="display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap;">
+                <select id="src-type" style="padding:8px;"><option value="local">本地目录</option><option value="http">HTTP 抓取</option></select>
+                <input id="src-dir" placeholder="目录路径 或 URL" style="flex:1; padding:8px; border:1px solid #dcdfe6; border-radius:6px;">
+                <input id="src-id" placeholder="来源ID" style="width:120px; padding:8px; border:1px solid #dcdfe6; border-radius:6px;">
+                <input id="src-cat" placeholder="分类" style="width:100px; padding:8px; border:1px solid #dcdfe6; border-radius:6px;">
+                <button onclick="addPolicySource()" style="padding:8px 16px; background:#667eea; color:white; border:none; border-radius:6px; cursor:pointer;">添加源</button>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:#f5f7fa;"><th style="padding:8px;text-align:left;">类型</th><th style="padding:8px;text-align:left;">来源ID</th><th style="padding:8px;text-align:left;">路径/URL</th><th style="padding:8px;text-align:left;">分类</th><th style="padding:8px;">操作</th></tr></thead>
+                <tbody id="policy-sources-tbody"><tr><td colspan="5" style="padding:12px;color:#909399;">加载中...</td></tr></tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>更新报告历史</h2>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:#f5f7fa;"><th style="padding:8px;text-align:left;">时间</th><th style="padding:8px;">扫描</th><th style="padding:8px;">新增</th><th style="padding:8px;">变更</th><th style="padding:8px;">入库</th><th style="padding:8px;">重复</th><th style="padding:8px;">失败</th></tr></thead>
+                <tbody id="policy-reports-tbody"><tr><td colspan="7" style="padding:12px;color:#909399;">加载中...</td></tr></tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>政策变更检测</h2>
+            <button onclick="loadChanges()" style="padding:8px 16px; background:#e6a23c; color:white; border:none; border-radius:6px; cursor:pointer; margin-bottom:12px;">刷新变更列表</button>
+            <div id="policy-changes-list" style="font-size:13px; color:#909399;">点击上方按钮加载...</div>
+        </div>
+    </div>
+
+    <script>
+        // 与后端 main.py 鉴权逻辑对齐
+        const AUTH_TOKEN = 'Bearer test_token_123';
+
+        const testCases = [
+            "餐饮发票能开专票抵扣吗？",
+            "小规模纳税人的增值税税率是多少？",
+            "什么是进项税和销项税？",
+            "小型微利企业的判定条件是什么？",
+            "个人所得税专项附加扣除有哪些项目？",
+            "如何开具红字发票？",
+            "一般纳税人的标准是什么？",
+            "汇算清缴是什么意思？",
+        ];
+        const casesContainer = document.getElementById('test-cases');
+        testCases.forEach(q => {
+            const div = document.createElement('div');
+            div.className = 'test-case';
+            div.textContent = q;
+            div.onclick = () => { document.getElementById('test-query').value = q; runTest(); };
+            casesContainer.appendChild(div);
+        });
+
+        async function runTest() {
+            const query = document.getElementById('test-query').value.trim();
+            if (!query) return;
+            const resultBox = document.getElementById('test-result');
+            resultBox.textContent = '测试中...';
+            try {
+                const resp = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': AUTH_TOKEN },
+                    body: JSON.stringify({ user_id: 'tester', query: query, session_id: 'test_session' })
+                });
+                const data = await resp.json();
+                resultBox.textContent = JSON.stringify(data, null, 2);
+            } catch (err) {
+                resultBox.textContent = '错误: ' + err.message;
+            }
+        }
+
+        document.getElementById('test-query').addEventListener('keydown', e => {
+            if (e.key === 'Enter') runTest();
+        });
+
+        // ========== 政策自动更新面板 ==========
+        async function loadPolicyStatus() {
+            try {
+                const r = await fetch('/api/policy/status', { headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const st = document.getElementById('policy-scheduler-status');
+                if (d.scheduler) {
+                    st.innerHTML = `调度器: ${d.scheduler.running ? '✅ 运行中' : '⏸ 已停止'} | 源: ${d.scheduler.sources_count} | 待处理: ${d.scheduler.pending_count}`;
+                }
+                if (d.latest_report) {
+                    const rpt = d.latest_report;
+                    document.getElementById('policy-update-msg').textContent =
+                        `最近更新: ${rpt.finished_at} | 扫描 ${rpt.scanned} 新增 ${rpt.new} 变更 ${rpt.changed||0} 入库 ${rpt.ingested}`;
+                }
+            } catch (e) { document.getElementById('policy-scheduler-status').textContent = '获取状态失败'; }
+        }
+
+        async function triggerPolicyUpdate() {
+            const btn = event.target;
+            btn.disabled = true; btn.textContent = '更新中...';
+            try {
+                const r = await fetch('/api/policy/update', { method: 'POST', headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const rpt = d.report;
+                document.getElementById('policy-update-msg').textContent =
+                    `更新完成! 扫描 ${rpt.scanned} 新增 ${rpt.new} 变更 ${rpt.changed||0} 入库 ${rpt.ingested} 重复 ${rpt.duplicated} 失败 ${rpt.failed}`;
+                loadPolicyStatus(); loadSources(); loadReports();
+            } catch (e) {
+                document.getElementById('policy-update-msg').textContent = '更新失败: ' + e.message;
+            }
+            btn.disabled = false; btn.textContent = '触发更新扫描';
+        }
+
+        async function loadSources() {
+            try {
+                const r = await fetch('/api/policy/sources', { headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const tbody = document.getElementById('policy-sources-tbody');
+                if (!d.sources || d.sources.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="padding:12px;color:#909399;">暂无政策源</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = d.sources.map(s => `<tr>
+                    <td style="padding:8px;">${s.source_type}</td>
+                    <td style="padding:8px;">${s.source_id}</td>
+                    <td style="padding:8px; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${s.directory || (s.urls||[]).join(', ') || '-'}</td>
+                    <td style="padding:8px;">${s.category || '-'}</td>
+                    <td style="padding:8px; text-align:center;"><button onclick="removeSource('${s.source_id}')" style="padding:4px 10px; background:#f56c6c; color:white; border:none; border-radius:4px; cursor:pointer;">删除</button></td>
+                </tr>`).join('');
+            } catch (e) { document.getElementById('policy-sources-tbody').innerHTML = '<tr><td colspan="5" style="padding:12px;color:#f56c6c;">加载失败</td></tr>'; }
+        }
+
+        async function addPolicySource() {
+            const type = document.getElementById('src-type').value;
+            const dir = document.getElementById('src-dir').value.trim();
+            const id = document.getElementById('src-id').value.trim();
+            const cat = document.getElementById('src-cat').value.trim();
+            if (!dir) { alert('请输入路径或 URL'); return; }
+            const body = { type, source_id: id, category: cat };
+            if (type === 'local') body.directory = dir;
+            else body.urls = [dir];
+            try {
+                const r = await fetch('/api/policy/sources', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': AUTH_TOKEN }, body: JSON.stringify(body) });
+                const d = await r.json();
+                if (d.success) { loadSources(); loadPolicyStatus(); }
+            } catch (e) { alert('添加失败: ' + e.message); }
+        }
+
+        async function removeSource(sourceId) {
+            if (!confirm(`确定删除政策源 "${sourceId}" ？`)) return;
+            try {
+                await fetch(`/api/policy/sources/${encodeURIComponent(sourceId)}`, { method: 'DELETE', headers: { 'Authorization': AUTH_TOKEN } });
+                loadSources(); loadPolicyStatus();
+            } catch (e) { alert('删除失败: ' + e.message); }
+        }
+
+        async function loadReports() {
+            try {
+                const r = await fetch('/api/policy/reports?limit=10', { headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const tbody = document.getElementById('policy-reports-tbody');
+                if (!d.reports || d.reports.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" style="padding:12px;color:#909399;">暂无更新报告</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = d.reports.map(rpt => `<tr>
+                    <td style="padding:8px; font-size:12px;">${rpt.finished_at || '-'}</td>
+                    <td style="padding:8px; text-align:center;">${rpt.scanned}</td>
+                    <td style="padding:8px; text-align:center; color:#67c23a;">${rpt.new}</td>
+                    <td style="padding:8px; text-align:center; color:#e6a23c;">${rpt.changed||0}</td>
+                    <td style="padding:8px; text-align:center;">${rpt.ingested}</td>
+                    <td style="padding:8px; text-align:center; color:#909399;">${rpt.duplicated}</td>
+                    <td style="padding:8px; text-align:center; color:#f56c6c;">${rpt.failed}</td>
+                </tr>`).join('');
+            } catch (e) { document.getElementById('policy-reports-tbody').innerHTML = '<tr><td colspan="7" style="padding:12px;color:#f56c6c;">加载失败</td></tr>'; }
+        }
+
+        async function loadChanges() {
+            try {
+                const r = await fetch('/api/policy/changes?limit=10', { headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const el = document.getElementById('policy-changes-list');
+                if (!d.changes || d.changes.length === 0) {
+                    el.innerHTML = '<span style="color:#67c23a;">✅ 暂无政策变更</span>';
+                    return;
+                }
+                el.innerHTML = d.changes.map((c, i) =>
+                    `<div style="padding:8px; background:#fef0f0; border-radius:6px; margin-bottom:8px;">
+                        <strong>${c.title || c.item_id}</strong>
+                        <span style="color:#909399; font-size:11px;"> ${c.updated_at}</span>
+                        <div style="font-size:11px; color:#909399; margin-top:4px;">${c.snapshot || '(无快照)'}</div>
+                        <a href="#" onclick="loadDiff('${c.unique_key}');return false;" style="font-size:11px; color:#667eea;">查看 diff →</a>
+                        <pre id="diff-${i}" style="display:none; font-size:11px; background:#f5f7fa; padding:8px; margin-top:4px; border-radius:4px; overflow-x:auto;"></pre>
+                    </div>`
+                ).join('');
+            } catch (e) { document.getElementById('policy-changes-list').textContent = '加载失败: ' + e.message; }
+        }
+
+        async function loadDiff(uniqueKey) {
+            try {
+                const r = await fetch(`/api/policy/changes/${encodeURIComponent(uniqueKey)}`, { headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const preEl = event.target.nextElementSibling;
+                preEl.textContent = d.diff || '无差异内容';
+                preEl.style.display = preEl.style.display === 'none' ? 'block' : 'none';
+            } catch (e) { alert('获取 diff 失败: ' + e.message); }
+        }
+
+        // 页面初始化时加载政策面板数据
+        loadPolicyStatus(); loadSources(); loadReports();
+
+        // ========== 政策自动更新面板 ==========
+        async function loadPolicyStatus() {
+            try {
+                const r = await fetch('/api/policy/status', { headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const st = document.getElementById('policy-scheduler-status');
+                if (d.scheduler) {
+                    st.innerHTML = `调度器: ${d.scheduler.running ? '✅ 运行中' : '⏸ 已停止'} | 源: ${d.scheduler.sources_count} | 待处理: ${d.scheduler.pending_count}`;
+                }
+                if (d.latest_report) {
+                    const rpt = d.latest_report;
+                    document.getElementById('policy-update-msg').textContent =
+                        `最近更新: ${rpt.finished_at} | 扫描 ${rpt.scanned} 新增 ${rpt.new} 变更 ${rpt.changed||0} 入库 ${rpt.ingested}`;
+                }
+            } catch (e) { document.getElementById('policy-scheduler-status').textContent = '获取状态失败'; }
+        }
+
+        async function triggerPolicyUpdate() {
+            const btn = event.target;
+            btn.disabled = true; btn.textContent = '更新中...';
+            try {
+                const r = await fetch('/api/policy/update', { method: 'POST', headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const rpt = d.report;
+                document.getElementById('policy-update-msg').textContent =
+                    `更新完成! 扫描 ${rpt.scanned} 新增 ${rpt.new} 变更 ${rpt.changed||0} 入库 ${rpt.ingested} 重复 ${rpt.duplicated} 失败 ${rpt.failed}`;
+                loadPolicyStatus(); loadSources(); loadReports();
+            } catch (e) {
+                document.getElementById('policy-update-msg').textContent = '更新失败: ' + e.message;
+            }
+            btn.disabled = false; btn.textContent = '触发更新扫描';
+        }
+
+        async function loadSources() {
+            try {
+                const r = await fetch('/api/policy/sources', { headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const tbody = document.getElementById('policy-sources-tbody');
+                if (!d.sources || d.sources.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="padding:12px;color:#909399;">暂无政策源</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = d.sources.map(s => `<tr>
+                    <td style="padding:8px;">${s.source_type}</td>
+                    <td style="padding:8px;">${s.source_id}</td>
+                    <td style="padding:8px; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${s.directory || (s.urls||[]).join(', ') || '-'}</td>
+                    <td style="padding:8px;">${s.category || '-'}</td>
+                    <td style="padding:8px; text-align:center;"><button onclick="removeSource('${s.source_id}')" style="padding:4px 10px; background:#f56c6c; color:white; border:none; border-radius:4px; cursor:pointer;">删除</button></td>
+                </tr>`).join('');
+            } catch (e) { document.getElementById('policy-sources-tbody').innerHTML = '<tr><td colspan="5" style="padding:12px;color:#f56c6c;">加载失败</td></tr>'; }
+        }
+
+        async function addPolicySource() {
+            const type = document.getElementById('src-type').value;
+            const dir = document.getElementById('src-dir').value.trim();
+            const id = document.getElementById('src-id').value.trim();
+            const cat = document.getElementById('src-cat').value.trim();
+            if (!dir) { alert('请输入路径或 URL'); return; }
+            const body = { type, source_id: id, category: cat };
+            if (type === 'local') body.directory = dir;
+            else body.urls = [dir];
+            try {
+                const r = await fetch('/api/policy/sources', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': AUTH_TOKEN }, body: JSON.stringify(body) });
+                const d = await r.json();
+                if (d.success) { loadSources(); loadPolicyStatus(); }
+            } catch (e) { alert('添加失败: ' + e.message); }
+        }
+
+        async function removeSource(sourceId) {
+            if (!confirm(`确定删除政策源 "${sourceId}" ？`)) return;
+            try {
+                await fetch(`/api/policy/sources/${encodeURIComponent(sourceId)}`, { method: 'DELETE', headers: { 'Authorization': AUTH_TOKEN } });
+                loadSources(); loadPolicyStatus();
+            } catch (e) { alert('删除失败: ' + e.message); }
+        }
+
+        async function loadReports() {
+            try {
+                const r = await fetch('/api/policy/reports?limit=10', { headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const tbody = document.getElementById('policy-reports-tbody');
+                if (!d.reports || d.reports.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" style="padding:12px;color:#909399;">暂无更新报告</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = d.reports.map(rpt => `<tr>
+                    <td style="padding:8px; font-size:12px;">${rpt.finished_at || '-'}</td>
+                    <td style="padding:8px; text-align:center;">${rpt.scanned}</td>
+                    <td style="padding:8px; text-align:center; color:#67c23a;">${rpt.new}</td>
+                    <td style="padding:8px; text-align:center; color:#e6a23c;">${rpt.changed||0}</td>
+                    <td style="padding:8px; text-align:center;">${rpt.ingested}</td>
+                    <td style="padding:8px; text-align:center; color:#909399;">${rpt.duplicated}</td>
+                    <td style="padding:8px; text-align:center; color:#f56c6c;">${rpt.failed}</td>
+                </tr>`).join('');
+            } catch (e) { document.getElementById('policy-reports-tbody').innerHTML = '<tr><td colspan="7" style="padding:12px;color:#f56c6c;">加载失败</td></tr>'; }
+        }
+
+        async function loadChanges() {
+            try {
+                const r = await fetch('/api/policy/changes?limit=10', { headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const el = document.getElementById('policy-changes-list');
+                if (!d.changes || d.changes.length === 0) {
+                    el.innerHTML = '<span style="color:#67c23a;">✅ 暂无政策变更</span>';
+                    return;
+                }
+                el.innerHTML = d.changes.map((c, i) =>
+                    `<div style="padding:8px; background:#fef0f0; border-radius:6px; margin-bottom:8px;">
+                        <strong>${c.title || c.item_id}</strong>
+                        <span style="color:#909399; font-size:11px;"> ${c.updated_at}</span>
+                        <div style="font-size:11px; color:#909399; margin-top:4px;">${c.snapshot || '(无快照)'}</div>
+                        <a href="#" onclick="loadDiff('${c.unique_key}');return false;" style="font-size:11px; color:#667eea;">查看 diff →</a>
+                        <pre id="diff-${i}" style="display:none; font-size:11px; background:#f5f7fa; padding:8px; margin-top:4px; border-radius:4px; overflow-x:auto;"></pre>
+                    </div>`
+                ).join('');
+            } catch (e) { document.getElementById('policy-changes-list').textContent = '加载失败: ' + e.message; }
+        }
+
+        async function loadDiff(uniqueKey) {
+            try {
+                const r = await fetch(`/api/policy/changes/${encodeURIComponent(uniqueKey)}`, { headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const preEl = event.target.nextElementSibling;
+                preEl.textContent = d.diff || '无差异内容';
+                preEl.style.display = preEl.style.display === 'none' ? 'block' : 'none';
+            } catch (e) { alert('获取 diff 失败: ' + e.message); }
+        }
+
+        // 页面初始化时加载政策面板数据
+        loadPolicyStatus(); loadSources(); loadReports();
+
+        // ========== 政策自动更新面板 ==========
+        async function loadPolicyStatus() {
+            try {
+                const r = await fetch('/api/policy/status', { headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const st = document.getElementById('policy-scheduler-status');
+                if (d.scheduler) {
+                    st.innerHTML = `调度器: ${d.scheduler.running ? '✅ 运行中' : '⏸ 已停止'} | 源: ${d.scheduler.sources_count} | 待处理: ${d.scheduler.pending_count}`;
+                }
+                if (d.latest_report) {
+                    const rpt = d.latest_report;
+                    document.getElementById('policy-update-msg').textContent =
+                        `最近更新: ${rpt.finished_at} | 扫描 ${rpt.scanned} 新增 ${rpt.new} 变更 ${rpt.changed||0} 入库 ${rpt.ingested}`;
+                }
+            } catch (e) { document.getElementById('policy-scheduler-status').textContent = '获取状态失败'; }
+        }
+
+        async function triggerPolicyUpdate() {
+            const btn = event.target;
+            btn.disabled = true; btn.textContent = '更新中...';
+            try {
+                const r = await fetch('/api/policy/update', { method: 'POST', headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const rpt = d.report;
+                document.getElementById('policy-update-msg').textContent =
+                    `更新完成! 扫描 ${rpt.scanned} 新增 ${rpt.new} 变更 ${rpt.changed||0} 入库 ${rpt.ingested} 重复 ${rpt.duplicated} 失败 ${rpt.failed}`;
+                loadPolicyStatus(); loadSources(); loadReports();
+            } catch (e) {
+                document.getElementById('policy-update-msg').textContent = '更新失败: ' + e.message;
+            }
+            btn.disabled = false; btn.textContent = '触发更新扫描';
+        }
+
+        async function loadSources() {
+            try {
+                const r = await fetch('/api/policy/sources', { headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const tbody = document.getElementById('policy-sources-tbody');
+                if (!d.sources || d.sources.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="padding:12px;color:#909399;">暂无政策源</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = d.sources.map(s => `<tr>
+                    <td style="padding:8px;">${s.source_type}</td>
+                    <td style="padding:8px;">${s.source_id}</td>
+                    <td style="padding:8px; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${s.directory || (s.urls||[]).join(', ') || '-'}</td>
+                    <td style="padding:8px;">${s.category || '-'}</td>
+                    <td style="padding:8px; text-align:center;"><button onclick="removeSource('${s.source_id}')" style="padding:4px 10px; background:#f56c6c; color:white; border:none; border-radius:4px; cursor:pointer;">删除</button></td>
+                </tr>`).join('');
+            } catch (e) { document.getElementById('policy-sources-tbody').innerHTML = '<tr><td colspan="5" style="padding:12px;color:#f56c6c;">加载失败</td></tr>'; }
+        }
+
+        async function addPolicySource() {
+            const type = document.getElementById('src-type').value;
+            const dir = document.getElementById('src-dir').value.trim();
+            const id = document.getElementById('src-id').value.trim();
+            const cat = document.getElementById('src-cat').value.trim();
+            if (!dir) { alert('请输入路径或 URL'); return; }
+            const body = { type, source_id: id, category: cat };
+            if (type === 'local') body.directory = dir;
+            else body.urls = [dir];
+            try {
+                const r = await fetch('/api/policy/sources', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': AUTH_TOKEN }, body: JSON.stringify(body) });
+                const d = await r.json();
+                if (d.success) { loadSources(); loadPolicyStatus(); }
+            } catch (e) { alert('添加失败: ' + e.message); }
+        }
+
+        async function removeSource(sourceId) {
+            if (!confirm(`确定删除政策源 "${sourceId}" ？`)) return;
+            try {
+                await fetch(`/api/policy/sources/${encodeURIComponent(sourceId)}`, { method: 'DELETE', headers: { 'Authorization': AUTH_TOKEN } });
+                loadSources(); loadPolicyStatus();
+            } catch (e) { alert('删除失败: ' + e.message); }
+        }
+
+        async function loadReports() {
+            try {
+                const r = await fetch('/api/policy/reports?limit=10', { headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const tbody = document.getElementById('policy-reports-tbody');
+                if (!d.reports || d.reports.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" style="padding:12px;color:#909399;">暂无更新报告</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = d.reports.map(rpt => `<tr>
+                    <td style="padding:8px; font-size:12px;">${rpt.finished_at || '-'}</td>
+                    <td style="padding:8px; text-align:center;">${rpt.scanned}</td>
+                    <td style="padding:8px; text-align:center; color:#67c23a;">${rpt.new}</td>
+                    <td style="padding:8px; text-align:center; color:#e6a23c;">${rpt.changed||0}</td>
+                    <td style="padding:8px; text-align:center;">${rpt.ingested}</td>
+                    <td style="padding:8px; text-align:center; color:#909399;">${rpt.duplicated}</td>
+                    <td style="padding:8px; text-align:center; color:#f56c6c;">${rpt.failed}</td>
+                </tr>`).join('');
+            } catch (e) { document.getElementById('policy-reports-tbody').innerHTML = '<tr><td colspan="7" style="padding:12px;color:#f56c6c;">加载失败</td></tr>'; }
+        }
+
+        async function loadChanges() {
+            try {
+                const r = await fetch('/api/policy/changes?limit=10', { headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const el = document.getElementById('policy-changes-list');
+                if (!d.changes || d.changes.length === 0) {
+                    el.innerHTML = '<span style="color:#67c23a;">✅ 暂无政策变更</span>';
+                    return;
+                }
+                el.innerHTML = d.changes.map((c, i) =>
+                    `<div style="padding:8px; background:#fef0f0; border-radius:6px; margin-bottom:8px;">
+                        <strong>${c.title || c.item_id}</strong>
+                        <span style="color:#909399; font-size:11px;"> ${c.updated_at}</span>
+                        <div style="font-size:11px; color:#909399; margin-top:4px;">${c.snapshot || '(无快照)'}</div>
+                        <a href="#" onclick="loadDiff('${c.unique_key}');return false;" style="font-size:11px; color:#667eea;">查看 diff →</a>
+                        <pre id="diff-${i}" style="display:none; font-size:11px; background:#f5f7fa; padding:8px; margin-top:4px; border-radius:4px; overflow-x:auto;"></pre>
+                    </div>`
+                ).join('');
+            } catch (e) { document.getElementById('policy-changes-list').textContent = '加载失败: ' + e.message; }
+        }
+
+        async function loadDiff(uniqueKey) {
+            try {
+                const r = await fetch(`/api/policy/changes/${encodeURIComponent(uniqueKey)}`, { headers: { 'Authorization': AUTH_TOKEN } });
+                const d = await r.json();
+                const preEl = event.target.nextElementSibling;
+                preEl.textContent = d.diff || '无差异内容';
+                preEl.style.display = preEl.style.display === 'none' ? 'block' : 'none';
+            } catch (e) { alert('获取 diff 失败: ' + e.message); }
+        }
+
+        // 页面初始化时加载政策面板数据
+        loadPolicyStatus(); loadSources(); loadReports();
+    </script>
+</body>
+</html>
