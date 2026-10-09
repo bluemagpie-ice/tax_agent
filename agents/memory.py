@@ -42,9 +42,9 @@ class ConversationMemory:
     """
 
     # 税务场景默认值（可在实例化时覆盖）
-    DEFAULT_COMPRESS_AT = 18
-    DEFAULT_RETAIN_RECENT = 8
-    DEFAULT_CONTEXT_BUDGET = 2400  # tokens
+    DEFAULT_COMPRESS_AT = 12
+    DEFAULT_RETAIN_RECENT = 4
+    DEFAULT_CONTEXT_BUDGET = 1200  # tokens
 
     # 跨会话用户画像的存储命名空间（按租户隔离）
     USER_PROFILE_NAMESPACE = "user_profile"
@@ -70,7 +70,8 @@ class ConversationMemory:
     def context_for(self, session_id: str, message: str) -> Dict[str, Any]:
         """组装供 LLM 使用的完整上下文包（含历史、画像、相关片段、最近对话）。"""
         session = self.get_session(session_id) or self._empty(session_id)
-        related = self._related(session.get("messages", []), message)
+        context_messages = [m for m in session.get("messages", []) if not m.get("exclude_from_context") and not m.get("pending")]
+        related = self._related(context_messages, message)
 
         profile = self._load_user_profile() or session.get("profile", {})
         prompt_parts: List[str] = []
@@ -82,11 +83,11 @@ class ConversationMemory:
             prompt_parts.append(
                 "[相关历史]\n" + "\n".join(f"- {item['content'][:240]}" for item in related)
             )
-        recent = session.get("messages", [])[-6:]
+        recent = context_messages[-4:]
         if recent:
             prompt_parts.append(
                 "[最近对话]\n"
-                + "\n".join(f"{item['role']}: {item['content'][:360]}" for item in recent)
+                + "\n".join(f"{item['role']}: {item['content'][:240]}" for item in recent)
             )
         # token压缩
         prompt_text = self._fit_context(prompt_parts)
@@ -127,6 +128,9 @@ class ConversationMemory:
         with self._lock:
             session = self.get_session(session_id) or self._empty(session_id)
             now = datetime.now().isoformat()
+            # 首次请求的 pending 消息已由 ensure_session 写入，完成后替换而非重复。
+            if session["messages"] and session["messages"][-1].get("pending"):
+                session["messages"].pop()
             session["messages"].extend(
                 [
                     {"role": "user", "content": user_message, "at": now},
@@ -197,6 +201,54 @@ class ConversationMemory:
         self._write(session)
         return True
 
+    def invalidate_document_context(self, session_id: str) -> None:
+        """删除资料后不再复用旧检索背景；历史消息仍可在界面查看。"""
+        session = self.get_session(session_id)
+        if session is None:
+            return
+        for message in session.get("messages", []):
+            message["exclude_from_context"] = True
+        session["summary"] = ""
+        for episode in session.get("episodes", []):
+            episode["status"] = "inactive"
+        self._write(session)
+
+    def pop_last_turn(self, session_id: str) -> bool:
+        """撤回最后一轮对话（移除最新的 user + assistant 消息对）。"""
+        session = self.get_session(session_id)
+        if session is None:
+            return False
+        messages = session.get("messages", [])
+        if len(messages) < 2:
+            return False
+        removed = messages[-2:]
+        if removed[0].get("role") != "user" or removed[1].get("role") != "assistant":
+            return False
+        session["messages"] = messages[:-2]
+        session["turns"] = max(0, int(session.get("turns", 1)) - 1)
+        session["updated_at"] = datetime.now().isoformat()
+        self._write(session)
+        return True
+
+    def ensure_session(self, session_id: str, first_query: str) -> bool:
+        """确保会话存在：用户一提问就立即创建，生成标题，不等 AI 回复。
+        仅首次创建时返回 True；会话已存在则跳过并返回 False。"""
+        existing = self.get_session(session_id)
+        if existing is not None:
+            return False
+        session = self._empty(session_id)
+        session["title"] = self._quick_title(first_query)
+        session["messages"] = [{"role": "user", "content": first_query, "at": datetime.now().isoformat(), "pending": True}]
+        self._write(session)
+        return True
+
+    def create_session(self, session_id: str) -> None:
+        """允许用户先上传单次文档，再开始提问；不写入占位问题。"""
+        if self.get_session(session_id) is None:
+            session = self._empty(session_id)
+            session["title"] = "新对话"
+            self._write(session)
+
     def stats(self) -> Dict[str, Any]:
         """返回当前租户的记忆概览（最多扫描 1000 条会话）。"""
         sessions = self.list_sessions(limit=1000)
@@ -263,7 +315,7 @@ class ConversationMemory:
 
     def _compress(self, session: Dict[str, Any]) -> None:
         """将超出窗口的历史消息压缩成摘要，保留最近 N 条。"""
-        archived = session["messages"][:-self.retain_recent]
+        archived = [m for m in session["messages"][:-self.retain_recent] if not m.get("exclude_from_context")]
         if not archived:
             return
         user_points = [item["content"] for item in archived if item.get("role") == "user"][-5:]
@@ -438,6 +490,11 @@ class ConversationMemory:
             except Exception as e:
                 logging.warning(f"标题 LLM 概括失败，回退截断: {e}")
         return cleaned[:20] + ("…" if len(cleaned) > 20 else "")
+
+    def _quick_title(self, text: str) -> str:
+        """对话主流程无需额外模型请求；保留 _generate_title 供显式概括使用。"""
+        cleaned = (text or "").strip().replace("\n", " ")
+        return cleaned[:20] + ("…" if len(cleaned) > 20 else "") if cleaned else "新对话"
 
     def _summarize_title(self, text: str) -> str:
         """用 LLM 把首条用户消息概括成不超过 10 字的对话标题。"""

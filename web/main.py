@@ -58,12 +58,13 @@ logging.basicConfig(
 import os
 import inspect
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, UploadFile, File, HTTPException, status, Header
+from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, status, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.params import Depends
 from starlette.responses import HTMLResponse, Response, StreamingResponse
@@ -101,8 +102,18 @@ async def lifespan(app: FastAPI):
     init_sql_tables()
     logger.info("[lifespan] SQL 业务表已就绪")
 
-    app.state.knowledge_agent = KnowledgeAgent()
-    app.state.tax_agent = TaxAgent()
+    app.state.knowledge_agent = None
+    app.state.tax_agent = None
+    llm_cfg = ConfigManager().get_llm_config()
+    if all(llm_cfg.values()) and not llm_cfg["api_key"].startswith("your_"):
+        try:
+            app.state.knowledge_agent = KnowledgeAgent()
+            app.state.tax_agent = TaxAgent()
+            app.state.tax_agent.registry._cache["knowledge_agent"] = app.state.knowledge_agent
+        except Exception as e:
+            logger.warning("[lifespan] Agent 初始化失败（%s），请在模型配置弹窗检查配置", type(e).__name__)
+    else:
+        logger.warning("[lifespan] 未配置有效 LLM，页面可用；请打开模型配置弹窗")
     app.state.knowledge_service = KnowledgeService()
     app.state.conversation_memory = _get_shared_memory()
 
@@ -114,7 +125,11 @@ async def lifespan(app: FastAPI):
     presets_dir = BASE_DIR / "knowledge" / "presets"
     if presets_dir.is_dir():
         preset_files = sorted(presets_dir.glob("*.md"))
-        if preset_files:
+        emb_cfg = ConfigManager().get_embedding_config()
+        rag_configured = (all(emb_cfg.values()) and not emb_cfg["api_key"].startswith("your_")
+                          and bool(os.getenv("QDRANT_CLUSTER_URL"))
+                          and "your-cluster" not in os.getenv("QDRANT_CLUSTER_URL", ""))
+        if preset_files and rag_configured:
             logger.info(f"[lifespan] 检测到 {len(preset_files)} 个预置知识文件，开始入库...")
             for pf in preset_files:
                 try:
@@ -125,7 +140,7 @@ async def lifespan(app: FastAPI):
                 except Exception as e:
                     logger.warning(f"[lifespan] 预置文件入库失败 {pf.name}: {e}")
         else:
-            logger.info("[lifespan] knowledge/presets/ 目录为空，跳过预置知识入库")
+            logger.info("[lifespan] 预置目录为空或 RAG 未配置，跳过自动入库；可配置后上传预置文件")
     else:
         os.makedirs(presets_dir, exist_ok=True)
         logger.info(f"[lifespan] 已创建预置知识目录: {presets_dir}")
@@ -181,12 +196,22 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, "policy_updater") and app.state.policy_updater:
         try:
             app.state.policy_updater.stop_scheduler()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[lifespan] 停止调度器失败（%s）", type(e).__name__)
     # 取消所有残余 async 任务，避免 "event loop is closed"
     import asyncio
-    tasks = [t for t in asyncio.all_tasks()
-             if t is not asyncio.current_task() and not t.done()]
+    # SSE 请求自身负责取消任务；不取消服务器和其他组件拥有的任务。
+    agents = [app.state.knowledge_agent, app.state.tax_agent]
+    if app.state.tax_agent is not None:
+        agents.extend(app.state.tax_agent.registry._cache.values())
+    for agent in list(agents):
+        if agent is not None:
+            agents.extend(child for name in ("policy_agent", "definition_agent")
+                          if (child := vars(agent).get(name)) is not None)
+    tasks = []
+    for agent in agents:
+        if agent is not None and agent.checkpointer is not None:
+            await agent.checkpointer.conn.close()
     for t in tasks:
         t.cancel()
     if tasks:
@@ -246,8 +271,9 @@ class KnowledgeService:
         self.upload_dir = PATHS["uploads"]
         from knowledge.kb import QdrantKnowledgeBase
         self._kb = QdrantKnowledgeBase(work_dir=PATHS["data"])
+        self._kb.upload_root = Path(self.upload_dir)
 
-    async def ingest_file(self, file: UploadFile, source_type: str = "user_upload") -> dict:
+    async def ingest_file(self, file: UploadFile, source_type: str = "user_upload", **metadata) -> dict:
         """
         文件入库管道【核心方法】
 
@@ -256,15 +282,19 @@ class KnowledgeService:
         :param source_type: 知识来源，default / user_upload / web_search
         """
         # 1. 保存文件到本地
-        file_path = self._save_file(file)
+        import asyncio
+        file_path = await asyncio.to_thread(self._save_file, file)
         try:
             import time
 
-            file_id = f"file_{int(time.time())}"
+            file_id = f"file_{uuid.uuid4().hex}"
             result = await self._kb.ingest_file(
                 file_path=str(file_path),
                 file_id=file_id,
                 source_type=source_type,
+                file_name=file.filename,
+                managed_upload=True,
+                **metadata,
             )
 
             if result.get("status") == "success":
@@ -287,7 +317,7 @@ class KnowledgeService:
                     from knowledge.embedding import PersistentDocumentStore
                     chunks_for_sql = [
                         {"id": c.id, "content": c.content}
-                        for c in PersistentDocumentStore.get_chunks()
+                        for c in PersistentDocumentStore().get_chunks()
                         if c.file_id == file_id
                     ]
                     if chunks_for_sql:
@@ -297,7 +327,13 @@ class KnowledgeService:
                         f"sql_id={sql_record.id}, chunks={len(chunks_for_sql)}"
                     )
                 except Exception as sql_err:
-                    logger.warning(f"[ingest_file] SQL 写入失败（不影响主流程）: {sql_err}")
+                    logger.error("[ingest_file] SQL 写入失败：%s", type(sql_err).__name__)
+                    record = next(f for f in self._kb._metadata["files"] if f["file_id"] == file_id)
+                    record["status"] = "upload_failed"
+                    from services.security import blocked_document_ids
+                    blocked_document_ids.add(file_id)
+                    self._kb.save_metadata()
+                    raise RuntimeError("业务记录保存失败，文档已隔离，可在文档管理中删除后重新上传") from sql_err
 
             return result
 
@@ -311,6 +347,50 @@ class KnowledgeService:
     async def list_files(self) -> list[dict]:
         """列出所有已上传文件（从持久化元数据读取，刷新不丢失）"""
         return await self._kb.list_files()
+
+    async def refresh_cloud_files(self):
+        """管理员显式同步云端清单，包括只有云端分块的历史资料。"""
+        import asyncio
+        def discover():
+            embedding = self._kb._ensure_embedding()
+            if embedding.qdrant is None:
+                raise RuntimeError("请先配置 Qdrant Cloud 地址、密钥和 Embedding")
+            client = embedding.qdrant.client
+            offset, grouped = None, {}
+            while True:
+                points, offset = client.scroll(collection_name=embedding.qdrant.COLLECTION_NAME,
+                    limit=256, offset=offset, with_vectors=False,
+                    with_payload=["file_id", "file_name", "title", "source_type", "owner_id", "scope", "session_id", "status"])
+                for point in points:
+                    payload = point.payload or {}
+                    fid = payload.get("file_id")
+                    if not fid:
+                        continue
+                    record = grouped.setdefault(fid, {"file_id": fid, "file_name": payload.get("file_name") or payload.get("title") or fid,
+                        "file_path": "", "chunk_count": 0, "cloud_only": True, "tax_metadata": payload})
+                    record["chunk_count"] += 1
+                if offset is None:
+                    return grouped
+        grouped = await asyncio.to_thread(discover)
+        existing = {f["file_id"]: f for f in self._kb._metadata.get("files", [])}
+        for fid, record in grouped.items():
+            existing.setdefault(fid, record)
+        self._kb._metadata["files"] = list(existing.values())
+        self._kb.save_metadata()
+        return len(grouped)
+
+    async def read_cloud_chunks(self, file_id):
+        import asyncio
+        def read():
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            embedding = self._kb._ensure_embedding()
+            if embedding.qdrant is None:
+                raise RuntimeError("Qdrant Cloud 未连接")
+            points, _ = embedding.qdrant.client.scroll(collection_name=embedding.qdrant.COLLECTION_NAME,
+                scroll_filter=Filter(must=[FieldCondition(key="file_id", match=MatchValue(value=file_id))]),
+                limit=256, with_vectors=False, with_payload=["content"])
+            return [(p.payload or {}).get("content", "") for p in points]
+        return await asyncio.to_thread(read)
 
     async def list_files_from_sql(self) -> list[dict]:
         """从 SQL 业务表读取已上传文件列表（含分块数）"""
@@ -337,17 +417,26 @@ class KnowledgeService:
 
     async def delete_file(self, file_id: str) -> dict:
         """删除指定文件：元数据 + Qdrant 向量 + 内存 store + SQL 表 + 磁盘原文件"""
-        ok = await self._kb.delete_file(file_id)
-
+        record = next((f for f in await self._kb.list_files() if f.get("file_id") == file_id), {})
         # 同步清理 SQL 业务表
-        try:
+        def finalize_sql():
             from database.repositories import KnowledgeFileRepository
             repo = KnowledgeFileRepository()
             sql_deleted = repo.delete_by_business_id(file_id)
+            # 历史 SQL 行尚无业务 ID，仅按已授权清单中的精确原路径清理关联记录。
+            if record.get("file_path"):
+                from database.models import KnowledgeFiles, KnowledgeChunks
+                from database.repositories import SessionLocal
+                with SessionLocal() as session:
+                    old_rows = session.query(KnowledgeFiles).filter(
+                        KnowledgeFiles.business_id.is_(None), KnowledgeFiles.path == record["file_path"]).all()
+                    for row in old_rows:
+                        session.query(KnowledgeChunks).filter(KnowledgeChunks.file_id == row.id).delete()
+                        session.delete(row)
+                    session.commit()
             if sql_deleted:
                 logger.info(f"[delete_file] SQL 记录已清理: file_id={file_id}")
-        except Exception as sql_err:
-            logger.warning(f"[delete_file] SQL 清理失败（不影响主流程）: {sql_err}")
+        ok = await self._kb.delete_file(file_id, finalize=finalize_sql)
 
         if ok:
             return {"status": "success", "message": f"文件 {file_id} 已删除", "file_id": file_id}
@@ -367,6 +456,8 @@ class KnowledgeService:
 
         file_name = _Path(file_path).stem
         file_id = f"preset_{file_name}"
+        if file_id in self._kb._metadata.get("disabled_presets", []):
+            return {"message": "已由管理员停用，跳过自动入库", "file_id": file_id, "skipped": True}
 
         # —— 去重：检查该 preset 是否已入库 ——
         if self._kb.is_file_ingested(file_id):
@@ -376,6 +467,7 @@ class KnowledgeService:
             file_path=file_path,
             file_id=file_id,
             source_type="default",
+            scope="system",
         )
 
     def _save_file(self, file: UploadFile) -> Path:
@@ -384,10 +476,17 @@ class KnowledgeService:
         文件名加时间戳前缀，防止同名文件冲突
         """
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_name = f"{ts}_{file.filename}"
+        from knowledge.parser import ParserFactory
+        name = Path((file.filename or "").replace("\\", "/")).name
+        if not name or not ParserFactory.is_supported(name):
+            raise ValueError("请上传支持的文本、PDF、Office 或图片文件")
+        safe_name = f"{ts}_{uuid.uuid4().hex}_{name}"
         file_path = Path(self.upload_dir) / safe_name
+        content = file.file.read()
+        if not content:
+            raise ValueError("不能上传空文件")
         with open(file_path, "wb") as f:
-            f.write(file.file.read())
+            f.write(content)
         return file_path
 
 
@@ -404,6 +503,7 @@ class TaxQueryRequest(BaseModel):
     query: str = Field(..., example="餐饮发票能开专票抵扣吗？",description="税务查询语句")
     session_id: Optional[str] = Field(None, description="会话ID")
     source_types: Optional[List[str]] = Field(None, description="知识来源筛选：default / user_upload / web_search；None 表示不限定")
+    web_search: bool = Field(False, description="本轮主动联网检索；检索摘要直接注入，不依赖向量入库")
 
 class ReferenceSource(BaseModel):
     """引用知识库来源"""
@@ -503,16 +603,23 @@ async def tax_chat(body: TaxQueryRequest, current_user: CurrentUser = Depends(ge
 
     TaxAgent.run() 内部已完成：意图路由 → 多 Agent 调度 → 汇总 → 长记忆注入与记录。
     """
-    logger.info(f"[同步请求] 用户={current_user.user_name}(id={current_user.id}) query={body.query[:30]}...")
+    if not body.query.strip():
+        raise HTTPException(status_code=400, detail="请输入税务问题")
+    if tax_agent is None:
+        raise HTTPException(status_code=503, detail="请先在 ⚙ 模型配置弹窗填写模型、API Key 和 Base URL")
+    logger.info("[同步请求] query_length=%d", len(body.query))
 
     try:
         session_id = body.session_id or f"session_{int(time.time())}"
+        if conversation_memory:
+            conversation_memory.ensure_session(session_id, body.query)
         answer = await tax_agent.run(
             body.query,
             context={
                 "thread_id": session_id,
                 "uid": current_user.id,
                 "source_types": body.source_types,
+                "web_search": body.web_search,
             },
         )
 
@@ -524,10 +631,10 @@ async def tax_chat(body: TaxQueryRequest, current_user: CurrentUser = Depends(ge
         )
 
     except Exception as e:
-        logger.error(f"[同步请求错误] {str(e)}", exc_info=True)
+        logger.warning("[同步请求错误] %s", type(e).__name__)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"查询失败: {str(e)}",
+            detail="查询失败，请检查模型配置或网络连接后重试",
         )
 
 # 新增的修改内容
@@ -537,85 +644,112 @@ async def tax_chat_stream(
     body: TaxQueryRequest,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """【流式对话接口】接收税务查询，实时推送 LLM 生成的 token 流（SSE 协议）
+    """【SSE 对话接口】接收税务查询，推送处理状态和实时生成的最终正文。
 
     架构链路：
         浏览器 EventSource
           ↓  (text/event-stream)
         FastAPI StreamingResponse
           ↓  (async generator)
-        agent_to_sse() ← agents/streaming.py 封装层
-          ↓  (LangGraph stream_mode="messages")
-        knowledge_agent.stream_messages() ← 全局单例
-          ↓  (LangGraph graph.astream())
+        status / token / done / error 事件
+          ↓
+        tax_agent.run() ← 全局编排器（正文生成时发出 token，完成后核对最终结果）
+          ↓  (LangGraph graph.ainvoke())
         LangGraph Agent + RAG 检索 + LLM 调用
     """
-    logger.info(f"[流式请求] 用户={current_user.user_name}(id={current_user.id}) query={body.query[:30]}...")
+    if not body.query.strip():
+        raise HTTPException(status_code=400, detail="请输入税务问题")
+    if tax_agent is None:
+        raise HTTPException(status_code=503, detail="请先在 ⚙ 模型配置弹窗填写模型、API Key 和 Base URL")
+    logger.info("[流式请求] query_length=%d", len(body.query))
 
     from langchain_core.messages import HumanMessage
     from agents.streaming import agent_to_sse
 
+    session_id = body.session_id or f"session_{int(time.time())}"
+
+    if conversation_memory:
+        try:
+            conversation_memory.ensure_session(session_id, body.query)
+        except Exception as exc:
+            logger.error("[流式] 创建会话失败（%s）", type(exc).__name__)
+            raise HTTPException(status_code=503, detail="会话保存失败，请检查本地磁盘后重试") from exc
+
     try:
-        session_id = body.session_id or f"session_{int(time.time())}"
         input_context = {
             "thread_id": session_id,
+            "uid": current_user.id,
             "user_id": current_user.id,
             "user_name": current_user.user_name,
             "source_types": body.source_types,
+            "web_search": body.web_search,
         }
 
-        # 注入长记忆上下文
-        enriched_query = body.query
-        try:
-            mem_ctx = conversation_memory.context_for(session_id, body.query)
-            if mem_ctx.get("prompt_text"):
-                enriched_query = (
-                    f"[以下为该用户的历史对话背景，供回答时参考]\n"
-                    f"{mem_ctx['prompt_text']}\n\n"
-                    f"[用户当前问题]\n{body.query}"
-                )
-        except Exception as mem_err:
-            logger.debug(f"[长记忆] 上下文注入失败: {mem_err}")
-
-        messages = [HumanMessage(content=enriched_query)]
-
+        # 与同步接口共用 TaxAgent 编排；长记忆注入和记录统一由 run 完成。
+        # SSE 保留 status / token / done / error 协议，正文随模型生成即时输出。
         import asyncio
 
-        # 用于收集流式输出的完整回答文本
-        collected_answer: list[str] = []
-
         async def sse_generator():
-            nonlocal collected_answer
+            task = None
             try:
-                async for sse_line in agent_to_sse(
-                    knowledge_agent.stream_messages(messages, input_context=input_context)
-                ):
-                    # 收集 token 类型事件中的文本，用于记录长记忆
-                    if '"type": "token"' in sse_line or 'event: token' in sse_line:
-                        import re as _re
-                        match = _re.search(r'"text":\s*"([^"]*)"', sse_line)
-                        if match:
-                            collected_answer.append(match.group(1))
-                    yield sse_line
+                yield f"event: status\ndata: {json.dumps({'text': ' 正在分析问题并检索相关知识…'}, ensure_ascii=False)}\n\n"
+                from agents.streaming import response_events, _sse_line
+                queue = asyncio.Queue()
+                loop = asyncio.get_running_loop()
+                token_count = 0
+                streamed_text = ""
+                stream_open = True
+                stream_started = time.perf_counter()
+                def emit(event, data):
+                    if stream_open:
+                        loop.call_soon_threadsafe(queue.put_nowait, (event, data))
+                callback_token = response_events.set(emit)
+                try:
+                    task = asyncio.create_task(tax_agent.run(body.query, context=input_context))
+                finally:
+                    response_events.reset(callback_token)
+                pending_event = None
+                try:
+                    while not task.done() or not queue.empty():
+                        pending_event = asyncio.create_task(queue.get())
+                        ready, _ = await asyncio.wait({task, pending_event}, timeout=10,
+                                                      return_when=asyncio.FIRST_COMPLETED)
+                        if pending_event in ready:
+                            event, data = pending_event.result()
+                            if event == "token":
+                                streamed_text += data.get("text", "")
+                                token_count += 1
+                                if token_count == 1:
+                                    logger.info("[流式] 首字耗时 %.2fs", time.perf_counter() - stream_started)
+                            yield _sse_line(event, data)
+                        else:
+                            pending_event.cancel()
+                            await asyncio.gather(pending_event, return_exceptions=True)
+                            if not ready:
+                                yield ": keepalive\n\n"
+                finally:
+                    if pending_event is not None and not pending_event.done():
+                        pending_event.cancel()
+                        await asyncio.gather(pending_event, return_exceptions=True)
+                answer = await task
+                if token_count == 0:
+                    yield _sse_line("token", {"text": answer or "（未返回内容）"})
+                elif streamed_text != answer:
+                    # 最终正文以编排结果为准，覆盖工具草稿或补齐未流出的降级正文。
+                    yield _sse_line("answer", {"text": answer or "（未返回内容）"})
+                logger.info("[流式] 完成耗时 %.2fs", time.perf_counter() - stream_started)
+                yield "event: done\ndata: null\n\n"
             except asyncio.CancelledError:
-                logger.info("[流式] 客户端断开或服务关闭，SSE generator 已终止")
-                return
+                logger.info("[流式] 客户端断开或服务关闭")
+                raise
             except Exception as e:
-                logger.error(f"[流式] generator 异常: {e}")
-                err_line = f"event: error\ndata: {json.dumps({'msg': str(e)})}\n\n"
-                yield err_line
+                logger.warning("[流式] 查询失败（%s）", type(e).__name__)
+                yield f"event: error\ndata: {json.dumps({'msg': '查询失败，请检查模型配置或网络连接后重试'}, ensure_ascii=False)}\n\n"
             finally:
-                # 流式结束后记录本轮对话到长记忆
-                full_answer = "".join(collected_answer)
-                if full_answer.strip():
-                    try:
-                        conversation_memory.record_turn(
-                            session_id=session_id,
-                            user_message=body.query,
-                            assistant_message=full_answer,
-                        )
-                    except Exception as mem_err:
-                        logger.warning(f"[长记忆] 流式记录对话失败: {mem_err}")
+                stream_open = False
+                if task is not None and not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
 
         return StreamingResponse(
             sse_generator(),
@@ -633,6 +767,8 @@ async def tax_chat_stream(
 # 新增的修改内容
 @app.get("/api/skills")
 def skills():
+    if knowledge_agent is None:
+        raise HTTPException(status_code=503, detail="请先在模型配置弹窗完成配置")
     """获取 Agent 支持的所有税务技能列表"""
     return {
         "success": True,
@@ -678,7 +814,7 @@ async def agent_endpoint(body: TaxQueryRequest, current_user: CurrentUser = Depe
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Agent 调用失败: {str(e)}")
 @app.get("/api/search")
-def global_search_api(q: str = "", limit: int = 12):
+def global_search_api(q: str = "", limit: int = 12, current_user: CurrentUser = Depends(get_current_user)):
     """全文搜索接口：对接本地 RAG 知识库检索。"""
     if not q or not q.strip():
         return {
@@ -767,6 +903,8 @@ async def create_knowledge_database(
 @app.post("/api/knowledge/upload")
 async def upload_knowledge(
     file: UploadFile = File(...),
+    scope: str | None = Form(None),
+    session_id: str | None = Form(None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """【文件入库接口】接收上传文件，调用 KnowledgeService 保存。
@@ -775,19 +913,43 @@ async def upload_knowledge(
     普通用户上传 → source_type="user_upload"（用户个人知识库）
     """
     try:
-        source_type = "default" if current_user.role == "admin" else "user_upload"
+        scope = scope or ("system" if current_user.role == "admin" else "global")
+        if scope not in ("global", "session", "system"):
+            raise HTTPException(status_code=400, detail="文档范围必须为 global/session/system")
+        if scope == "system" and current_user.role != "admin":
+            raise HTTPException(status_code=403, detail="只有管理员可上传系统资料")
+        if scope == "session":
+            if not session_id or not conversation_memory or conversation_memory.get_session(session_id) is None:
+                raise HTTPException(status_code=400, detail="请先创建或选择本人对话，再上传单次对话文档")
+        source_type = "default" if scope == "system" else "user_upload"
         logger.info(f"[上传] 用户={current_user.user_name}, role={current_user.role}, source_type={source_type}")
-        return await knowledge_service.ingest_file(file, source_type=source_type)
+        result = await knowledge_service.ingest_file(file, source_type=source_type,
+                    owner_id=current_user.id, scope=scope, session_id=session_id if scope == "session" else "")
+        if result.get("status") != "success":
+            raise HTTPException(status_code=502, detail=result.get("message", "文件入库未完成，请在文档页检查"))
+        return result
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"文件上传失败: {str(e)}")
 
 
 @app.get("/api/knowledge/files")
-async def list_knowledge_files(current_user: CurrentUser = Depends(get_current_user)):
+async def list_knowledge_files(include_system: bool = False, refresh_cloud: bool = False,
+                               current_user: CurrentUser = Depends(get_current_user)):
     """【已上传文件列表】从持久化元数据读取，刷新不丢失"""
     try:
+        if (include_system or refresh_cloud) and current_user.role != "admin":
+            raise HTTPException(status_code=403, detail="仅管理员可查看系统和历史隔离资料")
+        if refresh_cloud:
+            await knowledge_service.refresh_cloud_files()
         files = await knowledge_service.list_files()
+        files = [public_file_info(f) for f in files if can_manage_file(f, current_user, include_system)]
         return {"success": True, "files": files, "total": len(files)}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"获取文件列表失败: {str(e)}")
 
@@ -797,6 +959,8 @@ async def list_knowledge_files_sql(current_user: CurrentUser = Depends(get_curre
     """【SQL 业务表文件列表】从 KnowledgeFiles + KnowledgeChunks 表读取"""
     try:
         files = await knowledge_service.list_files_from_sql()
+        visible = {f["file_id"] for f in await knowledge_service.list_files() if can_manage_file(f, current_user)}
+        files = [f for f in files if f.get("business_id") in visible]
         return {"success": True, "files": files, "total": len(files)}
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"获取 SQL 文件列表失败: {str(e)}")
@@ -806,6 +970,18 @@ async def list_knowledge_files_sql(current_user: CurrentUser = Depends(get_curre
 async def delete_knowledge_file(file_id: str, current_user: CurrentUser = Depends(get_current_user)):
     """【删除文件】全链路清理：元数据 + Qdrant 向量 + 磁盘原文件"""
     try:
+        record = await authorized_file(file_id, current_user, admin=True)
+        metadata = record.get("tax_metadata", {})
+        if conversation_memory is not None and metadata.get("owner_id"):
+            from services.security import tenant_scope
+            with tenant_scope(metadata["owner_id"]):
+                sessions = ([{"session_id": metadata.get("session_id")}]
+                            if metadata.get("scope") == "session" else conversation_memory.list_sessions(limit=1000))
+                for session in sessions:
+                    sid = session.get("session_id")
+                    if sid:
+                        conversation_memory.invalidate_document_context(sid)
+                        await clear_conversation_checkpoints(sid)
         result = await knowledge_service.delete_file(file_id)
         if result.get("status") == "error":
             raise HTTPException(status_code=404, detail=result.get("message"))
@@ -814,6 +990,50 @@ async def delete_knowledge_file(file_id: str, current_user: CurrentUser = Depend
         raise
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"删除文件失败: {str(e)}")
+
+
+def can_manage_file(record, user, include_system=False):
+    metadata = record.get("tax_metadata", {})
+    if include_system and user.role == "admin":
+        return True
+    return (metadata.get("owner_id") == user.id and metadata.get("scope") in ("global", "session")
+            and metadata.get("source_type") != "default")
+
+
+def public_file_info(record):
+    metadata = record.get("tax_metadata", {})
+    return {"file_id": record["file_id"], "file_name": record.get("file_name", record["file_id"]),
+            "chunk_count": record.get("chunk_count", 0), "status": record.get("status", "active"),
+            "scope": metadata.get("scope") or ("system" if metadata.get("source_type") == "default" else "legacy"),
+            "session_id": metadata.get("session_id", ""), "cloud_only": record.get("cloud_only", False)}
+
+
+async def authorized_file(file_id, user, admin=False):
+    if knowledge_service is None:
+        raise HTTPException(status_code=503, detail="知识库服务未初始化")
+    record = next((f for f in await knowledge_service.list_files() if f.get("file_id") == file_id), None)
+    if record is None or not can_manage_file(record, user, admin):
+        raise HTTPException(status_code=404, detail="文档不存在或不属于当前用户")
+    return record
+
+
+@app.get("/api/knowledge/files/{file_id}/content")
+async def preview_knowledge_file(file_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    record = await authorized_file(file_id, current_user, admin=True)
+    from knowledge.embedding import PersistentDocumentStore
+    store = PersistentDocumentStore()
+    chunks = [c.content for c in store.get_chunks() if c.file_id == file_id]
+    if not chunks and record.get("cloud_only"):
+        chunks = await knowledge_service.read_cloud_chunks(file_id)
+    if not chunks and record.get("file_path"):
+        from knowledge.parser import ParserFactory
+        import asyncio
+        chunks = [await asyncio.to_thread(ParserFactory.get_parser(record["file_path"]).parse)]
+    if not chunks:
+        raise HTTPException(status_code=404, detail="文档正文未找到，请检查原文件或云端连接")
+    text = "\n\n".join(chunks)
+    return {"success": True, **public_file_info(record), "content": text[:200000],
+            "truncated": len(text) > 200000 or (record.get("cloud_only", False) and len(chunks) < record.get("chunk_count", 0))}
 
 @app.get("/api/memory")
 def get_memory(user_id: str, session_id: str | None = None, current_user: CurrentUser = Depends(get_current_user)):
@@ -847,13 +1067,7 @@ def get_memory(user_id: str, session_id: str | None = None, current_user: Curren
 @app.delete("/api/memory/{session_id}")
 async def delete_memory(session_id: str, current_user: CurrentUser = Depends(get_current_user)):
     """删除指定会话的长记忆（含 LangGraph checkpointer 状态）"""
-    ok = conversation_memory.delete_session(session_id)
-    if tax_agent is not None:
-        try:
-            await tax_agent.delete_thread(session_id)
-        except Exception as e:
-            logger.warning(f"[delete_memory] checkpointer 清理失败: {e}")
-    return {"success": ok, "session_id": session_id}
+    return await delete_conversation(session_id, current_user)
 
 
 # ---------------------------------------------------------------------------
@@ -885,8 +1099,8 @@ async def list_conversations(user_id: str = "web_user", current_user: CurrentUse
                     if m.get("role") == "user":
                         first_msg = m.get("content", "")[:50]
                         break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("[会话预览] 读取失败（%s）", type(e).__name__)
         # 若无 title（存量数据），用第一条消息生成
         if not title and first_msg:
             # 警告：此操作不应在只读查询中修改数据，这里仅做临时展示
@@ -901,6 +1115,18 @@ async def list_conversations(user_id: str = "web_user", current_user: CurrentUse
     # 按更新时间倒序排列
     result.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
     return {"success": True, "conversations": result}
+
+
+class CreateConversationRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+@app.post("/api/conversations")
+async def create_conversation(body: CreateConversationRequest, current_user: CurrentUser = Depends(get_current_user)):
+    if conversation_memory is None:
+        raise HTTPException(status_code=503, detail="会话服务未初始化")
+    conversation_memory.create_session(body.session_id)
+    return {"success": True, "session_id": body.session_id}
 
 
 @app.get("/api/conversations/{session_id}/messages")
@@ -944,15 +1170,50 @@ async def rename_conversation(
 @app.delete("/api/conversations/{session_id}")
 async def delete_conversation(session_id: str, current_user: CurrentUser = Depends(get_current_user)):
     """删除指定对话（记忆 + LangGraph checkpointer 状态一并清理）"""
-    ok = conversation_memory.delete_session(session_id)
+    if not conversation_memory or conversation_memory.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail="对话不存在或不属于当前用户")
+    if knowledge_service is not None:
+        for record in await knowledge_service.list_files():
+            metadata = record.get("tax_metadata", {})
+            if (metadata.get("owner_id") == current_user.id and metadata.get("scope") == "session"
+                    and metadata.get("session_id") == session_id):
+                await delete_knowledge_file(record["file_id"], current_user)
     # 同时清理 LangGraph checkpointer 里的多轮历史（若已启用）
-    if tax_agent is not None:
-        try:
-            await tax_agent.delete_thread(session_id)
-        except Exception as e:
-            logger.warning(f"[delete_conversation] checkpointer 清理失败: {e}")
+    await clear_conversation_checkpoints(session_id)
+    ok = conversation_memory.delete_session(session_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"对话 {session_id} 不存在")
+    return {"success": True, "session_id": session_id}
+
+
+async def clear_conversation_checkpoints(session_id):
+    names = ("knowledge_agent", "planning_agent", "calculation_agent", "invoice_agent", "compliance_agent", "filing_agent")
+    if tax_agent is None:
+        # 清理历史状态不依赖模型配置；复用原有 SQLite Saver，不创建模型客户端。
+        from agents.base_agent import _CHECKPOINT_DB_PATH, AsyncSqliteSaver
+        from services.security import checkpoint_thread_id
+        if not _CHECKPOINT_DB_PATH.exists():
+            return
+        try:
+            async with AsyncSqliteSaver.from_conn_string(str(_CHECKPOINT_DB_PATH)) as saver:
+                for thread_id in [session_id, *(f"{session_id}:{name}" for name in names)]:
+                    await saver.adelete_thread(checkpoint_thread_id(thread_id))
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="历史上下文清理失败，请保留记录并重试") from exc
+        return
+    for thread_id in [session_id, *(f"{session_id}:{name}" for name in names)]:
+        if not await tax_agent.delete_thread(thread_id):
+            raise HTTPException(status_code=503, detail="对话上下文清理未完成，请保留对话并重试")
+
+
+@app.delete("/api/conversations/{session_id}/messages/last")
+async def retract_last_turn(session_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    """撤回最后一轮对话（移除最新的 user + assistant 消息对）。"""
+    if not conversation_memory:
+        raise HTTPException(status_code=503, detail="记忆模块未初始化")
+    ok = conversation_memory.pop_last_turn(session_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="无可撤回的消息")
     return {"success": True, "session_id": session_id}
 
 
@@ -1134,17 +1395,60 @@ class SettingsUpdateRequest(BaseModel):
 @app.post("/api/settings")
 def update_settings(body: SettingsUpdateRequest, current_user: CurrentUser = Depends(get_current_user)):
     """保存模型配置到本地 config.json"""
+    global knowledge_agent, tax_agent
     try:
         ConfigManager().save_config(body.model_dump(exclude_none=True))
+        from langchain_openai import ChatOpenAI
+        cfg = ConfigManager().get_llm_config()
+        if all(cfg.values()) and not cfg["api_key"].startswith("your_"):
+            if tax_agent is None:
+                from agents.tax_agent import TaxAgent
+                tax_agent = TaxAgent()
+                app.state.tax_agent = tax_agent
+            if knowledge_agent is None:
+                from agents.knowledge_agent import KnowledgeAgent
+                knowledge_agent = KnowledgeAgent()
+                app.state.knowledge_agent = knowledge_agent
+            # 更新现有实例的客户端，保留会话、graph、checkpointer 和 API。
+            agents = [tax_agent, knowledge_agent]
+            registry = vars(tax_agent).get("registry")
+            if registry is not None:
+                registry._cache["knowledge_agent"] = knowledge_agent
+                agents.extend(vars(registry).get("_cache", {}).values())
+            for agent in list(agents):
+                agents.extend(child for name in ("policy_agent", "definition_agent")
+                              if (child := vars(agent).get(name)) is not None)
+            for agent in agents:
+                for attr in ("llm", "extract_llm"):
+                    old = vars(agent).get(attr)
+                    if old is not None:
+                        import httpx as _httpx
+                        setattr(agent, attr, ChatOpenAI(
+                            model=cfg["model"], api_key=cfg["api_key"], base_url=cfg["base_url"],
+                            temperature=getattr(old, "temperature", 0.3),
+                            timeout=_httpx.Timeout(connect=10.0, read=45.0, write=10.0, pool=5.0),
+                            max_retries=2,
+                        ))
+                svc = vars(agent).get("_embedding_service")
+                if svc is not None:
+                    svc.embedding_model = ConfigManager().get_embedding_config()["model"]
+            if conversation_memory is not None:
+                conversation_memory.set_title_llm(ChatOpenAI(
+                    model=cfg["model"], api_key=cfg["api_key"], base_url=cfg["base_url"],
+                    temperature=0.2, timeout=30.0, max_retries=2,
+                ))
         return {"success": True, "message": "配置已保存，下次对话生效"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"保存配置失败: {e}")
+        logger.warning("[配置] 更新失败（%s）", type(e).__name__)
+        raise HTTPException(status_code=500, detail="配置更新失败，请检查模型配置；已保存的配置可在弹窗中查看")
 
 # —— 联网检索结果管理 ——
 
 class WebSearchIngestRequest(BaseModel):
     query: str = Field(..., description="搜索关键词")
-    limit: int = Field(default=5, description="返回条数，默认 5，最多 10")
+    limit: int = Field(default=5, ge=1, le=10, description="返回条数，默认 5，最多 10")
 
 
 @app.post("/api/knowledge/web-search/ingest")
@@ -1156,8 +1460,19 @@ async def ingest_web_search(body: WebSearchIngestRequest, current_user: CurrentU
     """
     try:
         from services.tools.web_search_tool import search_and_ingest_web
-        result = search_and_ingest_web(query=body.query, limit=body.limit)
+        if not body.query.strip():
+            raise HTTPException(status_code=400, detail="请输入搜索关键词")
+        import asyncio
+        result = await asyncio.to_thread(search_and_ingest_web, query=body.query, limit=body.limit)
+        if result.get("file_id") and result.get("ingested"):
+            knowledge_service._kb._metadata.setdefault("files", []).append({
+                "file_id": result["file_id"], "file_name": body.query[:80], "file_path": "",
+                "chunk_count": result["ingested"], "status": "active", "cloud_only": True,
+                "tax_metadata": {"source_type": "web_search", "owner_id": current_user.id, "scope": "global", "session_id": ""}})
+            knowledge_service._kb.save_metadata()
         return {"success": True, **result}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"联网检索入库失败: {str(e)}")
 
@@ -1173,7 +1488,19 @@ async def delete_web_search_results(file_id: str | None = None, current_user: Cu
     """
     try:
         from services.tools.web_search_tool import delete_web_search_results as do_delete
+        records = await knowledge_service.list_files()
+        managed = [r for r in records if (not file_id or r["file_id"] == file_id)
+                   and r.get("tax_metadata", {}).get("owner_id") == current_user.id
+                   and r.get("tax_metadata", {}).get("source_type") == "web_search"]
+        for record in managed:
+            await delete_knowledge_file(record["file_id"], current_user)
+        if file_id and managed:
+            return {"success": True, "deleted_files": len(managed)}
         result = do_delete(file_id=file_id)
-        return {"success": True, **result}
+        if result.get("status") == "error":
+            raise HTTPException(status_code=502, detail=result["message"])
+        return {"success": True, "deleted_files": len(managed), **result}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"删除联网检索结果失败: {str(e)}")

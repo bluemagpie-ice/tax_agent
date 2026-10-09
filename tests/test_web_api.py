@@ -220,7 +220,8 @@ class TestOtherEndpoints:
         """/api/search 已对接真实检索，这里 mock 掉底层避免真实 embedding/Qdrant 调用"""
         fake_result = [{"id": "c1", "title": "增值税暂行条例", "content": "第一条...", "score": 0.9}]
         with patch("services.tools.kb_tools.search_tax_policy", return_value=fake_result) as mock_search:
-            resp = client.get("/api/search", params={"q": "增值税", "limit": 10})
+            resp = client.get("/api/search", params={"q": "增值税", "limit": 10},
+                              headers={"Authorization": "Bearer test_token_123"})
         assert resp.status_code == 200
         body = resp.json()
         assert body["success"] is True

@@ -120,7 +120,7 @@ class Messages(Base):
         return f"Messages(id={self.id}, role={self.role})"
 
 # ========数据库连接与操作配置=========
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL") or "sqlite:///./tax_agent.db"
 
 # 创建数据库引擎
 engine = create_engine(
@@ -136,6 +136,17 @@ def create_tables():
     创建所有数据库
     """
     Base.metadata.create_all(bind=engine)
+    # create_all 不会更新旧表；仅补齐文档 CRUD 已使用的三个可空/默认字段。
+    if engine.dialect.name == "sqlite":
+        from sqlalchemy import inspect, text
+        existing = {c["name"] for c in inspect(engine).get_columns("knowledge_files")}
+        with engine.begin() as connection:
+            for name, definition in (("business_id", "VARCHAR(100)"), ("file_name", "VARCHAR(255)"),
+                                     ("chunk_count", "INTEGER DEFAULT 0")):
+                if name not in existing:
+                    connection.execute(text(f"ALTER TABLE knowledge_files ADD COLUMN {name} {definition}"))
+                    logger.info("旧文档表补齐字段：%s", name)
+            connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_knowledge_files_business_id ON knowledge_files (business_id)"))
     logger.info("数据库表格创建成功")
 
 def get_db_session():

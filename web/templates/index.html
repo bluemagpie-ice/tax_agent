@@ -144,8 +144,9 @@
         }
         .suggestion-card:hover { border-color: var(--primary); background: var(--primary-soft); }
 
-        .message { display: flex; margin-bottom: 20px; }
-        .message.user { justify-content: flex-end; }
+        .message { display: flex; flex-direction: column; margin-bottom: 20px; }
+        .message.user { align-items: flex-end; }
+        .message.assistant { align-items: flex-start; }
         .message .bubble {
             max-width: 78%;
             padding: 10px 14px;
@@ -155,7 +156,7 @@
             overflow-wrap: break-word;
             word-break: break-word;
         }
-        .message.user .bubble { background: var(--bubble-user); border-bottom-right-radius: 4px; }
+        .message.user .bubble { background: var(--bubble-user); border-bottom-right-radius: 4px; max-width: 78%; }
         .message.assistant .bubble { background: transparent; padding-left: 0; padding-right: 0; width: 100%; max-width: 100%; }
 
         /* 消息操作按钮：位于消息底部独立一行，小符号，不挤占气泡 */
@@ -165,10 +166,11 @@
             margin-top: 2px;
             opacity: 0;
             transition: opacity .15s;
+            width: 100%;
         }
         .message:hover .msg-actions { opacity: 1; }
         .message.user .msg-actions { justify-content: flex-end; }
-        .message.assistant .msg-actions { justify-content: flex-start; padding-left: 0; }
+        .message.assistant .msg-actions { justify-content: flex-start; }
         .msg-actions button {
             background: transparent; border: none; cursor: pointer;
             color: var(--text-dim); font-size: 11px; padding: 3px 7px; border-radius: 5px;
@@ -283,6 +285,7 @@
             <div class="sidebar-footer">
                 <button class="icon-btn" id="theme-btn" onclick="toggleTheme()" title="切换主题">🌙</button>
                 <button class="icon-btn" id="settings-btn" onclick="showSettings()" title="模型配置">⚙</button>
+                <button class="icon-btn" onclick="location.href='/knowledge?session_id='+encodeURIComponent(currentSessionId)" title="我的文档：浏览与删除">📄</button>
                 <span class="spacer"></span>
                 <span style="font-size:12px;color:var(--text-dim)" id="me-label"></span>
             </div>
@@ -318,6 +321,7 @@
                     </div>
                     <div class="source-filter">
                         <label><input type="checkbox" id="chk-web" onchange="updateSourceTypes()"> 联网检索最新政策</label>
+                        <label>上传范围 <select id="upload-scope"><option value="session">仅当前对话</option><option value="global">我的所有对话</option></select></label>
                     </div>
                     <div class="composer-hint">内容由 AI 生成，仅供参考，请以当地税务机关为准</div>
                 </div>
@@ -332,13 +336,15 @@
         <div class="modal">
             <h3>⚙ 模型配置</h3>
             <div class="section-title">LLM 对话模型</div>
-            <label>模型</label><select id="cfg-llm-model"></select>
+            <label>模型 ID（可自定义）</label><input id="cfg-llm-model" list="llm-models" placeholder="填写服务商提供的模型 ID"><datalist id="llm-models"></datalist>
             <label>API Key</label><input id="cfg-llm-key" type="password" placeholder="留空则不修改" autocomplete="off">
             <label>Base URL</label><input id="cfg-llm-url" type="text" placeholder="https://open.bigmodel.cn/api/paas/v4/">
             <div class="section-title">Embedding 向量模型</div>
-            <label>模型</label><select id="cfg-emb-model"></select>
+            <label>模型 ID（可自定义，需与现有索引维度一致）</label><input id="cfg-emb-model" list="emb-models"><datalist id="emb-models"></datalist>
             <label>API Key</label><input id="cfg-emb-key" type="password" placeholder="留空则不修改" autocomplete="off">
             <label>Base URL</label><input id="cfg-emb-url" type="text" placeholder="https://api.siliconflow.cn/v1">
+            <label>访问 Token（自定义鉴权时填写，留空使用演示 Token）</label><input id="cfg-auth-token" type="password" autocomplete="off">
+            <p style="font-size:12px;color:var(--text-dim)">模型设置对当前服务所有会话生效；API Key 留空保留原值。</p>
             <div class="btn-row">
                 <button class="btn btn-cancel" onclick="closeSettings()">取消</button>
                 <button class="btn btn-primary" onclick="saveSettings()">保存</button>
@@ -347,7 +353,7 @@
     </div>
 
     <script>
-        const AUTH_TOKEN = 'Bearer test_token_123';
+        let AUTH_TOKEN = 'Bearer ' + (sessionStorage.getItem('tax_agent_auth_token') || 'test_token_123');
         const chat = document.getElementById('chat');
         const chatInner = document.getElementById('chat-inner');
         const userInput = document.getElementById('user-input');
@@ -449,14 +455,22 @@
             if (!wrap || wrap.querySelector('.msg-actions')) return;
             const actions = document.createElement('div');
             actions.className = 'msg-actions';
-            actions.appendChild(makeActionBtn('复制', () => copyText(text)));
+            if (text && text.trim()) {
+                actions.appendChild(makeActionBtn('复制', () => copyText(text)));
+            }
             if (role === 'user') {
-                actions.appendChild(makeActionBtn('修改', () => { userInput.value = text; userInput.focus(); userInput.dispatchEvent(new Event('input')); }));
+                if (text && text.trim()) {
+                    actions.appendChild(makeActionBtn('修改', () => { userInput.value = text; userInput.focus(); userInput.dispatchEvent(new Event('input')); }));
+                }
                 actions.appendChild(makeActionBtn('撤回', () => retractMessage(wrap)));
             } else {
-                actions.appendChild(makeActionBtn('重新生成', () => regenerate(wrap)));
+                if (lastUserQuery()) {
+                    actions.appendChild(makeActionBtn('重新生成', () => regenerate(wrap)));
+                }
             }
-            wrap.appendChild(actions);
+            if (actions.children.length > 0) {
+                wrap.appendChild(actions);
+            }
         }
         function makeActionBtn(label, onClick) {
             const b = document.createElement('button');
@@ -476,7 +490,14 @@
             try { document.execCommand('copy'); } catch (e) {}
             document.body.removeChild(ta); showToast('已复制');
         }
-        function retractMessage(userWrap) {
+        async function retractMessage(userWrap) {
+            try {
+                const response = await fetch(`/api/conversations/${currentSessionId}/messages/last`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': AUTH_TOKEN },
+                });
+                if (!response.ok) { const error = await response.json(); throw new Error(error.detail || '撤回失败'); }
+            } catch (e) { /* 后端确认成功后才移除 DOM */ showToast(e.message || '撤回失败', true); return; }
             let next = userWrap.nextElementSibling;
             while (next && next.classList && next.classList.contains('message')) {
                 const after = next.nextElementSibling;
@@ -487,8 +508,10 @@
         }
         function regenerate(assistantWrap) {
             const q = lastUserQuery();
+            if (!q) { showToast('没有可重新生成的问题', true); return; }
             assistantWrap.remove();
-            if (q) { userInput.value = q; sendMessage(); }
+            userInput.value = q;
+            sendMessage();
         }
         function lastUserQuery() {
             const bubbles = chatInner.querySelectorAll('.message.user .bubble');
@@ -589,23 +612,16 @@
             sendBtn.classList.add('stop');
 
             try {
-                if (selectedSourceTypes.includes('web_search')) {
-                    try {
-                        await fetch('/api/knowledge/web-search/ingest', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json', 'Authorization': AUTH_TOKEN },
-                            body: JSON.stringify({ query: text, limit: 5 }),
-                        });
-                    } catch (e) { console.warn('[联网检索] 失败（不影响对话）', e); }
-                }
+                // 本轮联网直接由后端编排器处理，避免向量入库失败导致搜索失效。
 
                 const resp = await fetch('/api/chat/stream', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'Authorization': AUTH_TOKEN },
-                    body: JSON.stringify({ user_id: 'web_user', query: text, session_id: currentSessionId, source_types: selectedSourceTypes }),
+                    body: JSON.stringify({ user_id: 'web_user', query: text, session_id: currentSessionId, source_types: selectedSourceTypes, web_search: document.getElementById('chk-web').checked }),
                     signal: abortController.signal,
                 });
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                loadConversations();
+                if (!resp.ok) { const error = await resp.json(); throw new Error(error.detail || `HTTP ${resp.status}`); }
 
                 const reader = resp.body.getReader();
                 const decoder = new TextDecoder();
@@ -624,12 +640,14 @@
                             if (line.startsWith('event:')) type = line.slice(6).trim();
                             else if (line.startsWith('data:')) dataStr = line.slice(5).trim();
                         }
-                        if (type === 'token') {
+                        if (type === 'status') {
+                            if (!answerText) assistantMsg.bubble.textContent = JSON.parse(dataStr).text || '处理中…';
+                        } else if (type === 'token' || type === 'answer') {
                             try {
                                 const p = JSON.parse(dataStr);
-                                answerText += p.text || '';
+                                answerText = type === 'answer' ? (p.text || '') : answerText + (p.text || '');
                                 assistantMsg.bubble.textContent = answerText;
-                            } catch (e) {}
+                            } catch (e) { throw new Error('回复数据格式错误，请重试'); }
                             if (autoScroll) scrollToBottom();
                         } else if (type === 'thought') {
                             try { thinkText += JSON.parse(dataStr); } catch (e) { thinkText += dataStr; }
@@ -637,7 +655,9 @@
                             thinkPanel.querySelector('.think-body').textContent = thinkText;
                             if (autoScroll) scrollToBottom();
                         } else if (type === 'error') {
-                            answerText += '\n\n⚠️ ' + dataStr;
+                            let error = dataStr;
+                            try { const payload = JSON.parse(dataStr); error = payload.msg || payload; } catch (e) {}
+                            answerText += '\n\n⚠️ ' + error;
                         } else if (type === 'done') {
                             // 流式结束
                         }
@@ -727,7 +747,6 @@
                 }
             } catch (e) { console.error('加载历史失败', e); }
             loadConversations();
-            toggleSidebar(false);
         }
         function newConversation() {
             currentSessionId = 'session_' + Date.now();
@@ -740,12 +759,13 @@
             toggleSidebar(false);
         }
         async function deleteConversation(sessionId) {
-            if (!confirm('确定删除这个对话吗？')) return;
+            if (!confirm('确定删除这个对话及其单次文档和向量吗？全局文档会保留。')) return;
             try {
-                await fetch(`/api/conversations/${sessionId}`, { method: 'DELETE', headers: { 'Authorization': AUTH_TOKEN } });
+                const response = await fetch(`/api/conversations/${sessionId}`, { method: 'DELETE', headers: { 'Authorization': AUTH_TOKEN } });
+                if (!response.ok) { const error = await response.json(); throw new Error(error.detail || '删除未完成'); }
                 if (sessionId === currentSessionId) newConversation();
                 else loadConversations();
-            } catch (e) { showToast('删除失败', true); }
+            } catch (e) { showToast('删除失败：' + e.message, true); }
         }
         async function renameConversation(sessionId) {
             const cur = [...document.querySelectorAll('.conv-item')].find(x => x.onclick && x.textContent.includes(sessionId))?.querySelector('.conv-title')?.textContent || '';
@@ -766,14 +786,24 @@
 
         // ---------- 文件上传 ----------
         async function handleFiles(files) {
+            const scope = document.getElementById('upload-scope').value;
+            if (scope === 'session') {
+                try {
+                    const response = await fetch('/api/conversations', {method:'POST', headers:{'Authorization':AUTH_TOKEN,'Content-Type':'application/json'}, body:JSON.stringify({session_id:currentSessionId})});
+                    if (!response.ok) { const error = await response.json(); throw new Error(error.detail || '创建对话失败'); }
+                    loadConversations();
+                } catch (e) { showToast(e.message || '创建对话失败，请检查网络', true); return; }
+            }
             for (const f of files) {
                 const formData = new FormData();
                 formData.append('file', f);
+                formData.append('scope', scope);
+                if (scope === 'session') formData.append('session_id', currentSessionId);
                 try {
                     const resp = await fetch('/api/knowledge/upload', { method: 'POST', headers: { 'Authorization': AUTH_TOKEN }, body: formData });
                     const data = await resp.json();
                     if (data.status === 'success') showToast(`已上传：${f.name}`);
-                    else showToast('上传失败：' + (data.message || '未知'), true);
+                    else showToast('上传失败：' + (data.detail || data.message || '未知'), true);
                 } catch (e) { showToast('上传失败', true); }
             }
         }
@@ -797,17 +827,23 @@
                         sel.appendChild(opt);
                     }
                 });
+                if (data.config.llm.model && !Array.from(sel.options).some(o => o.value === data.config.llm.model)) {
+                    const opt = document.createElement('option'); opt.value = data.config.llm.model;
+                    opt.textContent = data.config.llm.model; opt.selected = true; sel.appendChild(opt);
+                }
             } catch (e) {}
         }
         async function onModelChange() {
             const model = document.getElementById('model-select').value;
             if (!model) return;
             try {
-                await fetch('/api/settings', {
+                const resp = await fetch('/api/settings', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'Authorization': AUTH_TOKEN },
                     body: JSON.stringify({ llm: { model } }),
                 });
+                const result = await resp.json();
+                if (!resp.ok) throw new Error(result.detail || '切换失败');
                 showToast('模型已切换，下次对话生效');
             } catch (e) { showToast('切换失败', true); }
         }
@@ -817,35 +853,46 @@
             try {
                 const resp = await fetch('/api/settings', { headers: { 'Authorization': AUTH_TOKEN } });
                 const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || '配置加载失败');
                 const cfg = data.config;
-                const llm = document.getElementById('cfg-llm-model');
+                const llm = document.getElementById('llm-models');
                 llm.innerHTML = ''; (data.known_models || []).forEach(m => {
                     const o = document.createElement('option'); o.value = m.value; o.textContent = m.label;
                     if (m.value === cfg.llm.model) o.selected = true; llm.appendChild(o);
                 });
-                document.getElementById('cfg-llm-key').value = cfg.llm.api_key;
+                document.getElementById('cfg-llm-model').value = cfg.llm.model;
+                document.getElementById('cfg-llm-key').value = '';
+                document.getElementById('cfg-llm-key').placeholder = cfg.llm.api_key_set ? '已配置；留空则保留' : '请输入 API Key';
                 document.getElementById('cfg-llm-url').value = cfg.llm.base_url;
-                const emb = document.getElementById('cfg-emb-model');
+                const emb = document.getElementById('emb-models');
                 emb.innerHTML = ''; (data.known_models || []).forEach(m => {
                     const o = document.createElement('option'); o.value = m.value; o.textContent = m.label;
                     if (m.value === cfg.embedding.model) o.selected = true; emb.appendChild(o);
                 });
-                document.getElementById('cfg-emb-key').value = cfg.embedding.api_key;
+                document.getElementById('cfg-emb-model').value = cfg.embedding.model;
+                document.getElementById('cfg-emb-key').value = '';
+                document.getElementById('cfg-emb-key').placeholder = cfg.embedding.api_key_set ? '已配置；留空则保留' : '可选；RAG 使用时填写';
                 document.getElementById('cfg-emb-url').value = cfg.embedding.base_url;
-            } catch (e) {}
+            } catch (e) { showToast(e.message, true); }
         }
-        function showSettings() { loadSettings(); document.getElementById('settings-modal').classList.add('show'); }
-        function closeSettings() { document.getElementById('settings-modal').classList.remove('show'); }
+        function showSettings() { document.getElementById('cfg-auth-token').value = sessionStorage.getItem('tax_agent_auth_token') || ''; loadSettings(); document.getElementById('settings-modal').classList.add('show'); }
+        function closeSettings() { document.getElementById('cfg-llm-key').value = ''; document.getElementById('cfg-emb-key').value = ''; document.getElementById('settings-modal').classList.remove('show'); }
         async function saveSettings() {
+            const token = document.getElementById('cfg-auth-token').value.trim().replace(/^Bearer\s+/i, '');
+            AUTH_TOKEN = 'Bearer ' + (token || 'test_token_123');
+            if (token) sessionStorage.setItem('tax_agent_auth_token', token);
+            else sessionStorage.removeItem('tax_agent_auth_token');
             const body = {
                 llm: { model: document.getElementById('cfg-llm-model').value, api_key: document.getElementById('cfg-llm-key').value, base_url: document.getElementById('cfg-llm-url').value },
                 embedding: { model: document.getElementById('cfg-emb-model').value, api_key: document.getElementById('cfg-emb-key').value, base_url: document.getElementById('cfg-emb-url').value },
             };
             try {
-                await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': AUTH_TOKEN }, body: JSON.stringify(body) });
+                const resp = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': AUTH_TOKEN }, body: JSON.stringify(body) });
+                const result = await resp.json();
+                if (!resp.ok) throw new Error(result.detail || '保存失败');
                 closeSettings(); showToast('✅ 配置已保存');
-                loadModels();
-            } catch (e) { showToast('保存失败', true); }
+                loadModels(); loadMe(); loadConversations();
+            } catch (e) { showToast(e.message, true); }
         }
 
         // ---------- 用户信息 / 开发者入口 ----------
@@ -854,9 +901,9 @@
                 const resp = await fetch('/api/me', { headers: { 'Authorization': AUTH_TOKEN } });
                 const data = await resp.json();
                 document.getElementById('me-label').textContent = data.is_developer ? '开发者' : '';
-                document.getElementById('settings-btn').style.display = data.is_developer ? '' : 'none';
+                document.getElementById('settings-btn').style.display = '';
             } catch (e) {
-                document.getElementById('settings-btn').style.display = 'none';
+                document.getElementById('settings-btn').style.display = '';
             }
         }
 

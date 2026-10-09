@@ -14,6 +14,7 @@
 
 import os
 import json
+import time
 import threading
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -21,8 +22,12 @@ from typing import List, Optional, Tuple
 from openai import OpenAI
 from dotenv import load_dotenv
 from services.config_manager import ConfigManager
+from services.cache_utils import TTLCache
+from services.security import current_tenant_id, document_session, document_visible, blocked_document_ids
 import logging
 import numpy as np
+
+_embed_cache = TTLCache(ttl_seconds=1800, maxsize=512)
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, PayloadSchemaType
 
@@ -221,15 +226,15 @@ class QdrantService:
             logging.info(f"集合 {self.COLLECTION_NAME} 已存在")
 
         # 为常用过滤字段创建 payload 索引（Qdrant Cloud 按字段过滤必须建索引，幂等操作）
-        for field_name in ("file_id", "source_type"):
-            try:
+        indexed = self.client.get_collection(self.COLLECTION_NAME).payload_schema or {}
+        for field_name in ("file_id", "source_type", "owner_id", "scope", "session_id", "status"):
+            if field_name not in indexed:
                 self.client.create_payload_index(
                     collection_name=self.COLLECTION_NAME,
                     field_name=field_name,
                     field_schema=PayloadSchemaType.KEYWORD,
+                    wait=True,
                 )
-            except Exception:
-                pass  # 索引已存在时忽略
 
     def upsert_chunks(self, chunks: list[ChunkDocument], embeddings):
         """
@@ -277,6 +282,21 @@ class QdrantService:
         if filters:
             must_conditions = []
             for key, value in filters.items():
+                if key == "__access":
+                    owner, session_id = value
+                    branches = [
+                        Filter(must=[FieldCondition(key="source_type", match=MatchValue(value="default"))]),
+                        Filter(must=[FieldCondition(key="scope", match=MatchValue(value="system"))]),
+                        Filter(must=[FieldCondition(key="owner_id", match=MatchValue(value=owner)),
+                                     FieldCondition(key="scope", match=MatchValue(value="global"))]),
+                    ]
+                    if session_id:
+                        branches.append(Filter(must=[
+                            FieldCondition(key="owner_id", match=MatchValue(value=owner)),
+                            FieldCondition(key="scope", match=MatchValue(value="session")),
+                            FieldCondition(key="session_id", match=MatchValue(value=session_id))]))
+                    must_conditions.append(Filter(should=branches))
+                    continue
                 if value is None:
                     continue
                 if isinstance(value, list):
@@ -288,7 +308,10 @@ class QdrantService:
                         FieldCondition(key=key, match=MatchValue(value=value))
                     )
             if must_conditions:
-                qdrant_filter = Filter(must=must_conditions)
+                excluded = [FieldCondition(key="status", match=MatchAny(any=["uploading", "deleting", "delete_failed", "upload_failed"]))]
+                if blocked_document_ids:
+                    excluded.append(FieldCondition(key="file_id", match=MatchAny(any=list(blocked_document_ids))))
+                qdrant_filter = Filter(must=must_conditions, must_not=excluded)
 
         results = self.client.query_points(
             collection_name=self.COLLECTION_NAME,
@@ -334,7 +357,15 @@ class QdrantService:
                     FieldCondition(key="file_id", match=MatchValue(value=file_id))
                 ]
             ),
+            wait=True,
         )
+        remaining = self.client.count(
+            collection_name=self.COLLECTION_NAME,
+            count_filter=Filter(must=[FieldCondition(key="file_id", match=MatchValue(value=file_id))]),
+            exact=True,
+        ).count
+        if remaining:
+            raise RuntimeError(f"云端仍有 {remaining} 个分块，删除未完成")
 
         logging.info(
             f"Qdrant 按 file_id='{file_id}' 删除了 {deleted_count} 条向量"
@@ -702,8 +733,8 @@ class PersistentDocumentStore:
             PersistentDocumentStore._shared_chunks = loaded
             logging.info(f"从文件加载了 {len(loaded)} 个文档块: {path}")
         except Exception as e:
-            logging.warning(f"加载文档块文件失败（将使用空列表）: {e}")
-            PersistentDocumentStore._shared_chunks = []
+            logging.error(f"加载文档块文件失败，保留原文件: {type(e).__name__}")
+            raise
 
     def _save_to_file(self):
         """将内存中的 chunks 序列化写入 JSON 文件"""
@@ -719,15 +750,23 @@ class PersistentDocumentStore:
                     "file_id": chunk.file_id,
                     "metadata": chunk.metadata,
                 })
-            with open(path, "w", encoding="utf-8") as f:
+            temporary = path.with_suffix(".json.tmp")
+            with open(temporary, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(temporary, path)
         except Exception as e:
             logging.error(f"保存文档块到文件失败: {e}")
+            raise
 
     def add_chunks(self, chunks):
         with PersistentDocumentStore._lock:
+            before = len(PersistentDocumentStore._shared_chunks)
             PersistentDocumentStore._shared_chunks.extend(chunks)
-            self._save_to_file()
+            try:
+                self._save_to_file()
+            except Exception:
+                PersistentDocumentStore._shared_chunks[before:] = []
+                raise
 
     def get_chunks(self) -> list:
         return PersistentDocumentStore._shared_chunks
@@ -759,6 +798,7 @@ class PersistentDocumentStore:
         """
         with cls._lock:
             before = len(cls._shared_chunks)
+            previous = list(cls._shared_chunks)
             cls._shared_chunks[:] = [
                 c for c in cls._shared_chunks if c.file_id != file_id
             ]
@@ -775,10 +815,14 @@ class PersistentDocumentStore:
                                 "file_id": chunk.file_id,
                                 "metadata": chunk.metadata,
                             })
-                        with open(cls._file_path, "w", encoding="utf-8") as f:
+                        temporary = cls._file_path.with_suffix(".json.tmp")
+                        with open(temporary, "w", encoding="utf-8") as f:
                             json.dump(data, f, ensure_ascii=False, indent=2)
+                        os.replace(temporary, cls._file_path)
                     except Exception as e:
+                        cls._shared_chunks[:] = previous
                         logging.error(f"移除分块后保存文件失败: {e}")
+                        raise
             return removed
 
     @classmethod
@@ -812,21 +856,19 @@ class EmbeddingService:
         use_qdrant: bool = True,
         use_bm25: bool = True,
         use_neo4j: bool = False,
+        skip_rebuild: bool = False,
     ):
         """
-        :param store:      数据存储对象，需有 get_chunks() 方法
-        :param use_qdrant: 是否使用 Qdrant 向量存储
-        :param use_bm25:   是否启用 BM25 词法检索
-        :param use_neo4j:  是否启用 Neo4j 图数据库检索
+        :param store:        数据存储对象，需有 get_chunks() 方法
+        :param use_qdrant:   是否使用 Qdrant 向量存储
+        :param use_bm25:     是否启用 BM25 词法检索
+        :param use_neo4j:    是否启用 Neo4j 图数据库检索
+        :param skip_rebuild: 跳过索引重建（Agent 复用已有 Qdrant 数据时设为 True）
         """
         self.store = store
         self.embedding_model = self._load_embedding_model()
         self.embedding_matrix = None
-        # 本地矩阵模式下，与 embedding_matrix 行号一一对应的有效文本块
-        # （rebuild 时已过滤空文本，保证向量与文本严格对齐）
         self._index_chunks: list = []
-        # Qdrant payload 缓存：每次 _semantic_search Qdrant 分支会填充
-        # 这样 search() 组装结果时优先从 Qdrant payload 取 content/file_id
         self._qdrant_payload_cache: dict = {}
 
         # ---------- Qdrant ----------
@@ -845,9 +887,11 @@ class EmbeddingService:
         self.bm25: Optional[BM25Service] = None
         if self.use_bm25:
             self.bm25 = BM25Service()
-            logging.info("BM25 词法服务已启用")
+            if not skip_rebuild:
+                logging.info("BM25 词法服务已启用")
         else:
-            logging.info("BM25 词法服务未启用（缺少依赖或配置）")
+            if not skip_rebuild:
+                logging.info("BM25 词法服务未启用（缺少依赖或配置）")
 
         # ---------- Neo4j ----------
         self.use_neo4j = use_neo4j
@@ -855,16 +899,19 @@ class EmbeddingService:
         if use_neo4j:
             try:
                 self.neo4j = Neo4jService()
-                if self.neo4j.driver is not None:
+                if self.neo4j.driver is not None and not skip_rebuild:
                     logging.info("Neo4j 图数据库服务已启用")
-                else:
+                elif self.neo4j.driver is None:
                     self.use_neo4j = False
             except Exception as e:
                 logging.warning(f"Neo4j 服务初始化失败，已禁用图检索: {e}")
                 self.use_neo4j = False
 
-        # ---------- 构建所有索引 ----------
-        self.rebuild()
+        # ---------- 构建所有索引（Agent 检索模式下跳过，Qdrant 已有数据） ----------
+        if not skip_rebuild:
+            self.rebuild()
+        else:
+            logging.info("EmbeddingService 跳过索引重建（复用 Qdrant 已有数据）")
 
     def _load_embedding_model(self):
         """
@@ -881,8 +928,8 @@ class EmbeddingService:
         return OpenAI(
             api_key=emb_cfg["api_key"] or os.getenv("EMBEDDING_API_KEY"),
             base_url=emb_cfg["base_url"] or os.getenv("EMBEDDING_BASE_URL"),
-            timeout=60.0,
-            max_retries=3,
+            timeout=15.0,
+            max_retries=1,
         )
 
     # Embedding 模型最大输入长度保护
@@ -901,22 +948,72 @@ class EmbeddingService:
         client = self._get_client()
         model_name = self.embedding_model or "BAAI/bge-m3"
 
+        try:
+            return self._embed_texts_with_cache(client, model_name, texts)
+        except (KeyError, TypeError, ValueError):
+            logging.warning("_embed_texts: 缓存逻辑异常，降级为无缓存调用", exc_info=True)
+            return self._embed_texts_no_cache(client, model_name, texts)
+
+    def _embed_texts_no_cache(
+        self, client, model_name: str, texts: list[str]
+    ) -> np.ndarray:
+        """原始无缓存向量化（兜底路径）。"""
         non_empty_idx = [i for i, t in enumerate(texts) if t and t.strip()]
         if not non_empty_idx:
             logging.warning("_embed_texts: 所有文本均为空，返回全零矩阵")
             return np.zeros((len(texts), 0))
-
         safe_texts = [texts[i][:self._MAX_TEXT_LEN] for i in non_empty_idx]
-        response = client.embeddings.create(
-            model=model_name,
-            input=safe_texts,
-        )
-
-        # 以第一个真实向量的维度为准，构造与输入等长的对齐矩阵
+        response = client.embeddings.create(model=model_name, input=safe_texts)
         dim = len(response.data[0].embedding)
         out = np.zeros((len(texts), dim))
         for j, i in enumerate(non_empty_idx):
             out[i] = response.data[j].embedding
+        return out
+
+    def _embed_texts_with_cache(
+        self, client, model_name: str, texts: list[str]
+    ) -> np.ndarray:
+        """带缓存的向量化（主路径）。"""
+        missing_indices = []
+        missing_texts = []
+        cached_vectors: dict = {}
+        for i in range(len(texts)):
+            t = texts[i]
+            if not t or not t.strip():
+                continue
+            key = t[:self._MAX_TEXT_LEN]
+            cache_key = (current_tenant_id(), model_name, str(client.base_url), key)
+            cached = _embed_cache.get(cache_key)
+            if cached is not None:
+                cached_vectors[i] = cached
+            else:
+                missing_indices.append(i)
+                missing_texts.append(key)
+
+        if not missing_indices and not cached_vectors:
+            logging.warning("_embed_texts: 所有文本均为空，返回全零矩阵")
+            return np.zeros((len(texts), 0))
+
+        response = None
+        if missing_texts:
+            response = client.embeddings.create(
+                model=model_name,
+                input=missing_texts,
+            )
+
+        dim = 0
+        if missing_texts and response is not None and response.data:
+            dim = len(response.data[0].embedding)
+        elif cached_vectors:
+            dim = len(next(iter(cached_vectors.values())))
+        out = np.zeros((len(texts), dim))
+        if response is not None:
+            for j, i in enumerate(missing_indices):
+                vec = response.data[j].embedding
+                out[i] = vec
+                _embed_cache.set((current_tenant_id(), model_name, str(client.base_url), missing_texts[j]), vec)
+        for i, vec in cached_vectors.items():
+            out[i] = vec
         return out
 
     # ==================== 索引构建 ==================== #
@@ -977,6 +1074,8 @@ class EmbeddingService:
 
         # 1. 向量索引：只向量化新增块
         try:
+            if self.use_qdrant and self.qdrant is None:
+                raise RuntimeError("Qdrant 未连接，文件尚未完成云端入库")
             embeddings = self._embed_texts(texts)
             if self.use_qdrant and self.qdrant:
                 self.qdrant.upsert_chunks(valid, embeddings)
@@ -989,6 +1088,7 @@ class EmbeddingService:
                     self._index_chunks = self._index_chunks + valid
         except Exception as e:
             logging.error(f"增量向量化失败: {e}")
+            raise
 
         # 2. BM25 词法索引（内部全量重建，但不涉及 embedding，代价低）
         if self.use_bm25 and self.bm25:
@@ -1148,6 +1248,9 @@ class EmbeddingService:
         :return: 列表，每项包含 {'id', 'score', 'content', 'file_id'} 以及 Qdrant payload 中的全部元数据
         """
         # 有 filters 时强制走 semantic（只有 Qdrant 向量检索支持元数据过滤）
+        filters = dict(filters or {})
+        if current_tenant_id() != "default":
+            filters["__access"] = (current_tenant_id(), document_session.get())
         effective_mode = "semantic" if filters else mode
 
         if effective_mode == "semantic":
@@ -1184,5 +1287,11 @@ class EmbeddingService:
             for key, val in payload.items():
                 if key not in record:  # 不覆盖顶层已有的字段
                     record[key] = val
+            if chunk and not payload:
+                record.update(chunk.metadata or {})
+            if current_tenant_id() != "default" and not document_visible(record):
+                continue
+            if file_id in blocked_document_ids:
+                continue
             results.append(record)
         return results

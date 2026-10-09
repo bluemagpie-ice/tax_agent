@@ -15,7 +15,9 @@
 
 import json
 import logging
+import uuid
 from typing import Optional
+from services.security import current_tenant_id, document_session
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +64,10 @@ def search_and_ingest_web(
     from knowledge.embedding import ChunkDocument, EmbeddingService, PersistentDocumentStore
     from pathlib import Path
 
-    file_id = f"web_{int(time.time())}_{Path(query).stem if query else 'search'}"
+    file_id = f"web_{uuid.uuid4().hex}"
 
     store = PersistentDocumentStore()
-    embedding = EmbeddingService(store=store, use_qdrant=True)
+    embedding = EmbeddingService(store=store, use_qdrant=True, skip_rebuild=True)
 
     documents = []
     for chunk in chunks_for_ingest:
@@ -79,7 +81,7 @@ def search_and_ingest_web(
         )
         for sc in sub_chunks:
             documents.append(ChunkDocument(
-                id=sc["id"],
+                id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{file_id}:{chunk['index']}:{sc['id']}")),
                 content=sc["content"],
                 file_id=file_id,
                 metadata={
@@ -87,12 +89,15 @@ def search_and_ingest_web(
                     "title": chunk["title"],
                     "url": chunk.get("url", ""),
                     "is_current": True,
+                    "owner_id": current_tenant_id(),
+                    "scope": "session" if document_session.get() else "global",
+                    "session_id": document_session.get(),
                 },
             ))
 
     if documents:
-        store.add_chunks(documents)
         embedding.add_chunks(documents)
+        store.add_chunks(documents)
         logger.info(f"[web_search_tool] 已入库 {len(documents)} 个分块，file_id={file_id}")
 
     return {
@@ -113,9 +118,15 @@ def delete_web_search_results(file_id: Optional[str] = None) -> dict:
         from knowledge.embedding import EmbeddingService, PersistentDocumentStore
 
         store = PersistentDocumentStore()
-        embedding = EmbeddingService(store=store, use_qdrant=True)
+        embedding = EmbeddingService(store=store, use_qdrant=True, skip_rebuild=True)
 
         if file_id:
+            if current_tenant_id() != "default":
+                owned = [c for c in store.get_chunks() if c.file_id == file_id
+                         and (c.metadata or {}).get("owner_id") == current_tenant_id()
+                         and (c.metadata or {}).get("source_type") == "web_search"]
+                if not owned:
+                    raise PermissionError("联网资料不存在或不属于当前用户")
             count = embedding.qdrant.delete_chunks_by_file_id(file_id)
             PersistentDocumentStore.remove_by_file_id(file_id)
             return {"deleted_count": count, "message": f"已删除 file_id={file_id} 的 {count} 条联网检索结果"}
@@ -125,6 +136,8 @@ def delete_web_search_results(file_id: Optional[str] = None) -> dict:
             for chunk in store.get_chunks():
                 meta = getattr(chunk, "metadata", {}) or {}
                 if isinstance(meta, dict) and meta.get("source_type") == "web_search":
+                    if current_tenant_id() != "default" and meta.get("owner_id") != current_tenant_id():
+                        continue
                     fid = getattr(chunk, "file_id", "") or ""
                     if fid and fid not in web_file_ids:
                         web_file_ids.append(fid)
@@ -135,7 +148,7 @@ def delete_web_search_results(file_id: Optional[str] = None) -> dict:
             return {"deleted_count": total, "message": f"已删除全部 {len(web_file_ids)} 批联网检索结果，共 {total} 条"}
     except Exception as e:
         logger.error(f"[web_search_tool] 删除失败: {e}")
-        return {"deleted_count": 0, "message": f"删除失败: {str(e)}"}
+        return {"status": "error", "deleted_count": 0, "message": f"删除失败: {str(e)}"}
 
 # ---- LangChain Tool 封装 ----
 

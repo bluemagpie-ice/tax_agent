@@ -6,6 +6,7 @@
 import logging
 import os
 import threading
+import inspect
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
@@ -113,6 +114,7 @@ class ImageParser(BaseParser):
     """
 
     def __init__(self,image_path:str):
+        super().__init__(image_path)
         self.image_path = image_path
         self._ocr_engine = None
 
@@ -124,11 +126,15 @@ class ImageParser(BaseParser):
         if self._ocr_engine is None:
             try:
                 from paddleocr import PaddleOCR
-                self._ocr_engine = PaddleOCR(
-                    use_angle_cls=True,   # 启用方向分类
-                    lang="ch",            # 中英文混合
-                    show_log=False        # 关闭 PaddleOCR 内部日志
-                )
+                if "use_textline_orientation" in inspect.signature(PaddleOCR).parameters:
+                    self._ocr_engine = PaddleOCR(lang="ch", use_textline_orientation=True,
+                                                 use_doc_orientation_classify=False, use_doc_unwarping=False)
+                else:
+                    self._ocr_engine = PaddleOCR(
+                        use_angle_cls=True,   # 启用方向分类
+                        lang="ch",            # 中英文混合
+                        show_log=False        # 关闭 PaddleOCR 内部日志
+                    )
                 logging.info("PaddleOCR 引擎初始化成功")
             except ImportError as e:
                 logging.error(f"PaddleOCR 未安装，请运行: pip install paddleocr")
@@ -139,7 +145,7 @@ class ImageParser(BaseParser):
         return self._ocr_engine
 
 
-    def parse(self,img_dir:str):
+    def parse(self,img_dir:str = ""):
         """
         图片OCR识别
         """
@@ -151,9 +157,14 @@ class ImageParser(BaseParser):
             logging.warning(f"图片文件不可读: {self.image_path}")
             return ""
 
-        ocr = self._get_ocr_engine()
-
         try:
+            ocr = self._get_ocr_engine()
+            if hasattr(ocr, "predict"):
+                text_lines = []
+                for page in ocr.predict(self.image_path):
+                    text_lines.extend(text for text, score in zip(page.get("rec_texts", []), page.get("rec_scores", []))
+                                      if score >= 0.5)
+                return "\n".join(text_lines)
             result = ocr.ocr(self.image_path,cls=True)
             if result is None or len(result) == 0:
                 logging.info("未识别到文字")
@@ -180,7 +191,7 @@ class ImageParser(BaseParser):
             return full_text
         except Exception as e:
             logging.error(f"OCR 识别错误: {e}")
-            return ""
+            return "OCR 错误：无法识别图片，请检查 PaddleOCR/PaddlePaddle 运行环境，或上传 TXT/Markdown 文本"
 
 
     # def _parse_data_url(data_uri: str) -> str:
@@ -200,11 +211,7 @@ class DocxParser(BaseParser):
         global _docling_converter
         if _docling_converter is None:
             _docling_converter = DocumentConverter(
-                format_options = {
-                InputFormat.DOCSX: None,
-                InputFormat.XLSX: None,
-                InputFormat.PPTX: None,
-                }
+                allowed_formats=[InputFormat.DOCX, InputFormat.XLSX, InputFormat.PPTX]
             )
         return _docling_converter
 
@@ -316,13 +323,18 @@ class PdfParser(BaseParser):
         """
         if not self._validate_file():
             return f"错误：文件不存在或无法读取"
-        if isinstance(self.file_path, str):
-            file_path = Path(self.file_path)
+        file_path = Path(self.file_path)
 
-        assert file_path.suffix == '.pdf', f"文件格式错误，需要是PDF文件，当前文件格式为：{file_path.suffix}"
+        if file_path.suffix.lower() != '.pdf':
+            return f"文件格式错误，需要是PDF文件，当前文件格式为：{file_path.suffix}"
 
-        loader = PyPDFLoader(file_path)
-        dos = loader.load()
+        try:
+            loader = PyPDFLoader(str(file_path))
+            dos = loader.load()
+        except ImportError:
+            return "依赖错误：PDF 解析需要 pypdf，请按 README 安装 requirements.txt"
+        except Exception as e:
+            return f"文件解析错误：{type(e).__name__}，请检查 PDF 是否损坏或加密"
         text = "\n\n".join([d.page_content for d in dos])
 
         # 扫描版 / 图片型 PDF：文本层为空或近乎为空时，回退到 OCR 识别
@@ -363,18 +375,18 @@ class PdfParser(BaseParser):
         if not hasattr(self, "_ocr_engine") or self._ocr_engine is None:
             try:
                 from paddleocr import PaddleOCR
-                self._ocr_engine = PaddleOCR(
-                    use_angle_cls=True,
-                    lang=lang,
-                    show_log=False
-                )
+                if "use_textline_orientation" in inspect.signature(PaddleOCR).parameters:
+                    self._ocr_engine = PaddleOCR(lang=lang, use_textline_orientation=True,
+                                                 use_doc_orientation_classify=False, use_doc_unwarping=False)
+                else:
+                    self._ocr_engine = PaddleOCR(use_angle_cls=True, lang=lang, show_log=False)
                 logging.info("PaddleOCR 引擎初始化成功")
             except ImportError as e:
                 logging.error("PaddleOCR 未安装，请运行: pip install paddleocr")
-                raise ImportError("请安装 paddleocr: pip install paddleocr") from e
+                return "OCR 依赖错误：请检查 PaddleOCR/PaddlePaddle 运行环境，或上传文本版 PDF"
             except Exception as e:
                 logging.error(f"PaddleOCR 初始化失败: {e}")
-                raise
+                return "OCR 初始化错误：请检查模型文件和运行环境，或上传文本版 PDF"
 
         # 2. 将 PDF 转换为图像
         try:
@@ -408,13 +420,21 @@ class PdfParser(BaseParser):
 
             try:
                 # PaddleOCR 支持直接传入 PIL.Image
-                result = ocr.ocr(images[page_idx], cls=True)
+                if hasattr(ocr, "predict"):
+                    import numpy as np
+                    result = ocr.predict(np.asarray(images[page_idx]))
+                else:
+                    result = ocr.ocr(images[page_idx], cls=True)
 
                 if result is None or len(result) == 0:
                     page_text = ""
                 else:
                     text_lines = []
                     for line in result:
+                        if isinstance(line, dict) or hasattr(line, "get"):
+                            text_lines.extend(text for text, score in zip(line.get("rec_texts", []), line.get("rec_scores", []))
+                                              if score >= confidence)
+                            continue
                         # line = [[[x1,y1], [x2,y2], [x3,y3], [x4,y4]], ('文字', confidence)]
                         if line and len(line) >= 2:
                             text = line[1][0]
@@ -452,6 +472,7 @@ class ParserFactory:
         '.docx': DocxParser,
         '.xlsx': DocxParser,
         '.ppt': DocxParser,
+        '.pptx': DocxParser,
         '.csv': CsvParser,
         '.jpg': ImageParser,
         '.jpeg': ImageParser,

@@ -56,6 +56,8 @@
         </div>
         <div class="card">
             <h2>上传税务文档到知识库</h2>
+            <label>保存范围 <select id="upload-scope"><option value="global">我的所有对话</option><option value="session">仅指定对话</option></select></label>
+            <select id="document-session" aria-label="文档所属对话"></select>
             <div class="upload-area" id="upload-area">
                 <div class="upload-icon">📄</div>
                 <div class="upload-text">点击或拖拽文件到此处上传</div>
@@ -72,18 +74,26 @@
         </div>
         <div class="card">
             <h2>已上传文件</h2>
+            <label>查看 <select id="view-scope" onchange="loadFileList()"><option value="all">我的全部文档</option><option value="global">全局文档</option><option value="session">指定对话文档</option></select></label>
+            <label id="admin-documents" hidden><input type="checkbox" id="include-system" onchange="loadFileList()"> 管理员资料与历史隔离文档 <button type="button" onclick="loadFileList(true)">同步云端清单</button></label>
+            <p id="file-message" role="status" style="margin-top:12px;color:#606266"></p>
             <div class="file-list" id="file-list">
                 <div class="empty-state">暂无文件，上传后将显示在这里</div>
             </div>
         </div>
     </div>
+    <dialog id="document-preview" style="width:80vw;max-width:900px;margin:auto;padding:24px;border:1px solid #ddd;border-radius:12px">
+        <button onclick="document.getElementById('document-preview').close()" style="float:right">关闭</button>
+        <h3 id="preview-title"></h3><p id="preview-hint"></p>
+        <pre id="preview-content" style="white-space:pre-wrap;overflow:auto;max-height:65vh;margin-top:16px"></pre>
+    </dialog>
 
     <script>
         const uploadArea = document.getElementById('upload-area');
         const fileInput = document.getElementById('file-input');
         const fileList = document.getElementById('file-list');
         // 与后端 main.py 鉴权逻辑对齐
-        const AUTH_TOKEN = 'Bearer test_token_123';
+        const AUTH_TOKEN = 'Bearer ' + (sessionStorage.getItem('tax_agent_auth_token') || 'test_token_123');
 
         uploadArea.onclick = () => fileInput.click();
         uploadArea.ondragover = e => { e.preventDefault(); uploadArea.classList.add('dragover'); };
@@ -91,20 +101,24 @@
         uploadArea.ondrop = e => { e.preventDefault(); uploadArea.classList.remove('dragover'); handleFiles(e.dataTransfer.files); };
         fileInput.onchange = e => handleFiles(e.target.files);
 
-        async function loadFileList() {
+        async function loadFileList(refreshCloud = false) {
             try {
-                const resp = await fetch('/api/knowledge/files', {
+                const includeSystem = document.getElementById('include-system').checked;
+                const resp = await fetch('/api/knowledge/files?include_system='+includeSystem+'&refresh_cloud='+refreshCloud, {
                     headers: { 'Authorization': AUTH_TOKEN },
                 });
                 const data = await resp.json();
-                if (data.success && data.files.length > 0) {
-                    fileList.innerHTML = '';
-                    data.files.forEach(f => {
-                        addFileItem(f.file_id, f.file_name || f.file_path, 'success', true);
-                    });
-                }
+                if (!resp.ok) throw new Error(data.detail || '清单读取失败');
+                fileList.innerHTML = '<div class="empty-state">当前范围暂无文档</div>';
+                const filter = document.getElementById('view-scope').value;
+                const session = document.getElementById('document-session').value;
+                data.files.filter(f => filter === 'all' || (f.scope === filter && (filter !== 'session' || f.session_id === session))).forEach(f => {
+                    addFileItem(f.file_id, f.file_name, f.status === 'active' ? 'success' : 'error', true,
+                        (f.scope === 'global' ? '全局' : f.scope === 'session' ? '仅此对话' : f.scope === 'system' ? '管理员资料' : '历史隔离') + (f.status === 'active' ? '' : ' / ' + f.status));
+                });
+                document.getElementById('file-message').textContent = refreshCloud ? '云端清单已同步；删除会同时清理文本块和向量。' : '';
             } catch (err) {
-                console.error('加载文件列表失败:', err);
+                document.getElementById('file-message').textContent = '加载失败：' + err.message;
             }
         }
 
@@ -137,11 +151,20 @@
         }
 
         async function handleFiles(files) {
+            const scope = document.getElementById('upload-scope').value;
+            const sessionId = document.getElementById('document-session').value;
+            if (scope === 'session' && !sessionId) { alert('请先选择一个对话'); return; }
+            if (scope === 'session') {
+                const response = await fetch('/api/conversations', {method:'POST', headers:{'Authorization':AUTH_TOKEN,'Content-Type':'application/json'}, body:JSON.stringify({session_id:sessionId})});
+                if (!response.ok) { const error = await response.json(); alert(error.detail || '创建对话失败'); return; }
+            }
             for (const file of files) {
                 const tempId = 'temp_' + Date.now() + '_' + file.name;
                 addFileItem(tempId, file.name, 'pending', false);
                 const formData = new FormData();
                 formData.append('file', file);
+                formData.append('scope', scope);
+                if (scope === 'session') formData.append('session_id', sessionId);
                 try {
                     const resp = await fetch('/api/knowledge/upload', {
                         method: 'POST',
@@ -153,24 +176,67 @@
                         document.getElementById('file-' + tempId)?.remove();
                         addFileItem(data.file_id, file.name, 'success', true);
                     } else {
-                        updateFileItem(tempId, 'error', data.message);
+                        updateFileItem(tempId, 'error', data.detail || data.message);
                     }
                 } catch (err) {
                     updateFileItem(tempId, 'error', err.message);
                 }
             }
             fileInput.value = '';
+            loadFileList();
         }
 
-        function addFileItem(id, name, status, showDelete) {
+        function addFileItem(id, name, status, showDelete, scopeText = '') {
             const empty = fileList.querySelector('.empty-state');
             if (empty) empty.remove();
             const div = document.createElement('div');
             div.className = 'file-item';
             div.id = 'file-' + id;
             const statusText = status === 'pending' ? '待处理' : status === 'success' ? '已入库' : '失败';
-            div.innerHTML = `<span class="file-name">${name}</span><span style="display:flex;align-items:center;gap:8px;"><span class="file-status status-${status}">${statusText}</span>${showDelete ? '<button class="delete-btn" onclick="deleteFile(\'' + id + '\', this)">删除</button>' : ''}</span>`;
+            const title = document.createElement('span'); title.className = 'file-name'; title.textContent = name;
+            const actions = document.createElement('span');
+            const label = document.createElement('span'); label.className = 'file-status status-' + status; label.textContent = scopeText || statusText;
+            actions.appendChild(label);
+            if (showDelete) {
+                const view = document.createElement('button'); view.textContent = '浏览'; view.onclick = () => previewFile(id); actions.appendChild(view);
+                const remove = document.createElement('button'); remove.className = 'delete-btn'; remove.textContent = '删除'; remove.onclick = () => deleteFile(id, remove); actions.appendChild(remove);
+            }
+            div.append(title, actions);
             fileList.appendChild(div);
+        }
+
+        async function previewFile(id) {
+            try {
+                const response = await fetch('/api/knowledge/files/'+encodeURIComponent(id)+'/content', {headers:{'Authorization':AUTH_TOKEN}});
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || '正文读取失败');
+                document.getElementById('preview-title').textContent = data.file_name;
+                document.getElementById('preview-content').textContent = data.content;
+                document.getElementById('preview-hint').textContent = data.truncated ? '正文过长，展示前20万字。' : '显示文档解析后的正文。';
+                document.getElementById('document-preview').showModal();
+            } catch (error) { alert(error.message); }
+        }
+
+        async function initializeDocuments() {
+            try {
+                const response = await fetch('/api/me', {headers:{'Authorization':AUTH_TOKEN}});
+                const user = await response.json();
+                if (!response.ok) throw new Error(user.detail || '登录失败，请回首页配置访问 Token');
+                if (user.is_developer) {
+                    document.getElementById('admin-documents').hidden = false;
+                    document.getElementById('upload-scope').add(new Option('管理员系统资料', 'system'));
+                }
+                const listResponse = await fetch('/api/conversations', {headers:{'Authorization':AUTH_TOKEN}});
+                const data = await listResponse.json();
+                if (!listResponse.ok) throw new Error(data.detail || '对话读取失败');
+                const active = new URLSearchParams(location.search).get('session_id') || localStorage.getItem('tax_agent_session_id') || 'session_' + Date.now();
+                const selector = document.getElementById('document-session');
+                selector.add(new Option('当前新对话', active));
+                (data.conversations || []).forEach(c => selector.add(new Option(c.title || c.session_id, c.session_id)));
+                selector.value = active;
+                selector.onchange = () => loadFileList();
+                loadFileList();
+            } catch (error) { document.getElementById('file-message').textContent = error.message; }
         }
 
         function updateFileItem(id, status, msg) {
@@ -188,9 +254,13 @@
                 const list = document.getElementById('kb-list');
                 const dbs = data.databases || [];
                 if (dbs.length === 0) { list.textContent = '暂无知识库'; return; }
-                list.innerHTML = dbs.map(kb =>
-                    `<div style="padding:6px 0; border-bottom:1px solid #f0f0f0;">${kb.name || kb.kb_id} <span style="color:#909399;font-size:12px;">（${kb.kb_type}）</span></div>`
-                ).join('');
+                list.replaceChildren();
+                dbs.forEach(kb => {
+                    const row = document.createElement('div');
+                    row.style.cssText = 'padding:6px 0;border-bottom:1px solid #f0f0f0';
+                    row.textContent = `${kb.name || kb.kb_id}（${kb.kb_type}）`;
+                    list.appendChild(row);
+                });
             } catch (e) {
                 document.getElementById('kb-list').textContent = '加载失败';
             }
@@ -218,7 +288,7 @@
         }
 
         loadDatabases();
-        loadFileList();
+        initializeDocuments();
     </script>
 </body>
 </html>

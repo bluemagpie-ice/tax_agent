@@ -18,8 +18,11 @@ import abc
 import json
 import logging
 import os
+import asyncio
+import threading
 from pathlib import Path
 from typing import Any, Optional
+from services.security import blocked_document_ids
 
 
 
@@ -70,14 +73,16 @@ class KnowledgeBase(abc.ABC):
             with open(self._metadata_file_path, "r", encoding="utf-8") as f:
                 self._metadata = json.load(f)
         except Exception as e:
-            logger.warning(f"加载元数据失败: {e}")
-            self._metadata = {}
+            logger.error("加载元数据失败，保留原文件：%s", type(e).__name__)
+            raise
         return self._metadata
 
     def save_metadata(self) -> None:
         """将元数据持久化到磁盘"""
-        with open(self._metadata_file_path, "w", encoding="utf-8") as f:
+        temporary = self._metadata_file_path.with_suffix(".json.tmp")
+        with open(temporary, "w", encoding="utf-8") as f:
             json.dump(self._metadata, f, ensure_ascii=False, indent=2)
+        os.replace(temporary, self._metadata_file_path)
 
     def get_database_info(self, kb_id: str, include_files: bool = False) -> Optional[dict]:
         """
@@ -145,7 +150,27 @@ class QdrantKnowledgeBase(KnowledgeBase):
     kb_type = "qdrant"
 
     def __init__(self, work_dir: str, kb_id: Optional[str] = None):
-        super().__init__(work_dir=work_dir, kb_id=kb_id)
+        super().__init__(work_dir=work_dir, kb_id=kb_id or "user_documents")
+        self.upload_root = Path(__file__).resolve().parent.parent / "uploads"
+        self._embedding_lock = threading.Lock()
+        if self.kb_id == "user_documents" and not self._metadata.get("legacy_imported"):
+            existing = {f["file_id"]: f for f in self._metadata.get("files", [])}
+            for path in Path(work_dir).glob("*_meta.json"):
+                if path == self._metadata_file_path:
+                    continue
+                try:
+                    legacy = json.loads(path.read_text(encoding="utf-8"))
+                    for record in legacy.get("files", []):
+                        if record.get("file_id"):
+                            existing.setdefault(record["file_id"], record)
+                except (OSError, ValueError) as exc:
+                    logger.warning("历史文档记录读取失败：%s (%s)", path.name, type(exc).__name__)
+            self._metadata["files"] = list(existing.values())
+            self._metadata["legacy_imported"] = True
+            self.save_metadata()
+        for record in self._metadata.get("files", []):
+            if record.get("status", "active") != "active":
+                blocked_document_ids.add(record["file_id"])
 
         # 运行期对象（懒加载，避免构造时强制依赖环境变量）
         self._store = None
@@ -156,8 +181,10 @@ class QdrantKnowledgeBase(KnowledgeBase):
         if self._embedding_service is not None:
             return self._embedding_service
         from knowledge.embedding import EmbeddingService, PersistentDocumentStore
-        self._store = PersistentDocumentStore()
-        self._embedding_service = EmbeddingService(store=self._store, use_qdrant=True)
+        with self._embedding_lock:
+            if self._embedding_service is None:
+                self._store = PersistentDocumentStore()
+                self._embedding_service = EmbeddingService(store=self._store, use_qdrant=True, skip_rebuild=True)
         return self._embedding_service
 
     def is_file_ingested(self, file_id: str) -> bool:
@@ -186,18 +213,48 @@ class QdrantKnowledgeBase(KnowledgeBase):
 
     # -------------------- 实现抽象接口 -------------------- #
     async def ingest_file(self, file_path: str, **kwargs) -> dict:
+        """先保留文件记录；部分入库失败也能在管理页找到并删除。"""
+        import uuid
+        file_id = kwargs.setdefault("file_id", f"file_{uuid.uuid4().hex}")
+        record = {"file_id": file_id, "file_name": kwargs.get("file_name") or Path(file_path).name,
+                  "file_path": file_path, "chunk_count": 0, "status": "uploading",
+                  "managed_upload": kwargs.get("managed_upload", False),
+                  "tax_metadata": {key: kwargs[key] for key in ("owner_id", "scope", "session_id", "source_type") if key in kwargs}}
+        self._metadata.setdefault("files", []).append(record)
+        blocked_document_ids.add(file_id)
+        self.save_metadata()
+        try:
+            result = await self._ingest_file(file_path, **kwargs)
+            if result.get("status") != "success":
+                record["status"] = "upload_failed"
+                self.save_metadata()
+                return result
+            record["status"] = "active"
+            blocked_document_ids.discard(file_id)
+            self.save_metadata()
+            from services.tools.kb_tools import _search_cache
+            _search_cache.clear()
+            return result
+        except Exception:
+            record["status"] = "upload_failed"
+            self.save_metadata()
+            raise
+
+    async def _ingest_file(self, file_path: str, **kwargs) -> dict:
         """
         入库流程：
         parser -> chunking -> embedding -> qdrant
         """
         import time
-        from knowledge.parser import ParserFactory
+        import importlib
         from knowledge.chunking import split_text
         from knowledge.embedding import ChunkDocument
 
-        parser = ParserFactory.get_parser(file_path)
-        markdown_text = parser.parse()
-        if not markdown_text or "错误" in markdown_text:
+        # 解析器首次导入和初始化可能较慢，避免阻塞正在流式回复的其他请求。
+        parser_module = await asyncio.to_thread(importlib.import_module, "knowledge.parser")
+        parser = await asyncio.to_thread(parser_module.ParserFactory.get_parser, file_path)
+        markdown_text = await asyncio.to_thread(parser.parse)
+        if not markdown_text or markdown_text.lstrip().startswith(("解析错误", "文件解析错误", "PDF 错误", "OCR 错误", "OCR 依赖错误", "OCR 初始化错误", "依赖错误", "错误：")):
             return {"status": "error", "message": markdown_text or "解析失败"}
 
         preset_id = kwargs.get("chunk_preset_id", "general")
@@ -208,7 +265,7 @@ class QdrantKnowledgeBase(KnowledgeBase):
         tax_metadata: dict = {}
         for key in ("tax_type", "document_number", "issuer", "effective_date",
                     "law_type", "is_current", "title", "source_type",
-                    "expiry_date", "superseded_by"):
+                    "expiry_date", "superseded_by", "owner_id", "scope", "session_id", "file_name"):
             val = kwargs.get(key)
             if val is not None and val != "":
                 tax_metadata[key] = val
@@ -226,19 +283,20 @@ class QdrantKnowledgeBase(KnowledgeBase):
         )
 
         # 写入 store 并触发向量化
-        embedding = self._ensure_embedding()
+        embedding = await asyncio.to_thread(self._ensure_embedding)
         documents = [
             ChunkDocument(id=c["id"], content=c["content"], file_id=c["file_id"], metadata=tax_metadata)
             for c in chunks
         ]
-        embedding.store.add_chunks(documents)
-        embedding.add_chunks(documents)
+        await asyncio.to_thread(embedding.add_chunks, documents)
+        await asyncio.to_thread(embedding.store.add_chunks, documents)
 
         # 记录元数据
         self._metadata.setdefault("files", [])
-        self._metadata["files"].append({
+        record = next(f for f in self._metadata["files"] if f["file_id"] == file_id)
+        record.update({
             "file_id": file_id,
-            "file_name": Path(file_path).name,
+            "file_name": kwargs.get("file_name") or Path(file_path).name,
             "file_path": file_path,
             "chunk_count": len(chunks),
             "tax_metadata": tax_metadata,
@@ -257,34 +315,39 @@ class QdrantKnowledgeBase(KnowledgeBase):
         embedding = self._ensure_embedding()
         return embedding.search(query=query, limit=limit)
 
-    async def delete_file(self, file_id: str) -> bool:
+    async def delete_file(self, file_id: str, finalize=None) -> bool:
         """
         删除指定文件：元数据 + Qdrant 向量 + 内存 store 全链路清理
 
         Returns:
-            True 表示至少删除了一项（元数据或向量）；False 表示该 file_id 不存在
+            True 表示全链路完成；False 表示该 file_id 不存在；失败抛异常并保留重试记录。
         """
         deleted_any = False
 
         # 1. 清理元数据
         files = self._metadata.get("files", [])
-        original_len = len(files)
-        self._metadata["files"] = [f for f in files if f.get("file_id") != file_id]
-        meta_removed = original_len - len(self._metadata["files"])
-        if meta_removed > 0:
-            self.save_metadata()
-            deleted_any = True
-            logger.info(f"[delete_file] 元数据中移除 file_id={file_id}")
+        record = next((f for f in files if f.get("file_id") == file_id), None)
+        if record is None:
+            return False
+        if record.get("status") == "uploading":
+            raise RuntimeError("文档仍在入库，请等待处理结束后删除")
+        file_path = record.get("file_path")
+        record["status"] = "deleting"
+        blocked_document_ids.add(file_id)
+        self.save_metadata()
 
         # 2. 清理 Qdrant 向量（按 payload.file_id 过滤）
         try:
-            embedding = self._ensure_embedding()
-            if embedding.qdrant is not None:
-                qdrant_removed = embedding.qdrant.delete_chunks_by_file_id(file_id)
-                if qdrant_removed > 0:
-                    deleted_any = True
+            embedding = await asyncio.to_thread(self._ensure_embedding)
+            if embedding.qdrant is None:
+                raise RuntimeError("Qdrant 未连接，无法确认云端文档已删除")
+            qdrant_removed = await asyncio.to_thread(embedding.qdrant.delete_chunks_by_file_id, file_id)
+            deleted_any = qdrant_removed > 0
         except Exception as e:
             logger.error(f"[delete_file] Qdrant 删除失败: {e}")
+            record["status"] = "delete_failed"
+            self.save_metadata()
+            raise RuntimeError("云端删除失败，文件记录已保留，请检查连接后重试") from e
 
         # 3. 清理内存 store（通过类方法操作类级别共享列表 + 同步到磁盘文件）
         try:
@@ -296,22 +359,52 @@ class QdrantKnowledgeBase(KnowledgeBase):
                 )
         except Exception as e:
             logger.error(f"[delete_file] 内存 store 清理失败: {e}")
+            record["status"] = "delete_failed"
+            self.save_metadata()
+            raise
 
         # 4. 清理磁盘上的原始文件
-        file_path = None
-        for f in self._metadata.get("files", []):
-            if f.get("file_id") == file_id:
-                file_path = f.get("file_path")
         if file_path:
             try:
-                if os.path.isfile(file_path):
+                path = Path(file_path).resolve()
+                if record.get("managed_upload") and not path.is_relative_to(self.upload_root.resolve()):
+                    raise RuntimeError("上传文件路径不在管理目录内，删除未完成")
+                # 管理员预置源代码资料保留，下面记录停用，防止重启复活。
+                if path.is_relative_to(self.upload_root.resolve()) and os.path.isfile(path):
                     os.remove(file_path)
                     logger.info(f"[delete_file] 已删除磁盘文件: {file_path}")
                     deleted_any = True
             except Exception as e:
                 logger.error(f"[delete_file] 磁盘文件删除失败: {e}")
+                record["status"] = "delete_failed"
+                self.save_metadata()
+                raise
 
-        return deleted_any
+        try:
+            if finalize is not None:
+                await asyncio.to_thread(finalize)
+        except Exception:
+            record["status"] = "delete_failed"
+            self.save_metadata()
+            raise
+        if file_id.startswith("preset_"):
+            disabled = self._metadata.setdefault("disabled_presets", [])
+            if file_id not in disabled:
+                disabled.append(file_id)
+        # 1. 所有组件完成后清理元数据；SQL 由 KnowledgeService 清理。
+        self._metadata["files"] = [f for f in files if f.get("file_id") != file_id]
+        try:
+            self.save_metadata()
+        except Exception:
+            self._metadata["files"] = files
+            record["status"] = "delete_failed"
+            raise
+        embedding._qdrant_payload_cache.clear()
+        from services.tools.kb_tools import _search_cache
+        from knowledge.embedding import _embed_cache
+        _search_cache.clear()
+        _embed_cache.clear()
+        return True
     async def list_files(self) -> list[dict]:
         return list(self._metadata.get("files", []))
 

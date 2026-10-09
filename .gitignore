@@ -20,6 +20,9 @@ __pycache__/
 # LangGraph 持久化数据（checkpoint 数据库）
 # ========================================
 agents/**/checkpoints.sqlite3
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 
 # ========================================
 # 知识库 / 上传文件

@@ -19,6 +19,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,11 @@ def _read_config_file() -> dict[str, Any]:
         return {}
     try:
         with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
+            data = json.load(f)
+        if not isinstance(data, dict) or any(not isinstance(data.get(k, {}), dict) for k in ("llm", "embedding")):
+            raise ValueError("配置必须是对象，llm / embedding 必须是对象")
+        return data
+    except (json.JSONDecodeError, OSError, ValueError) as e:
         logger.warning(f"[ConfigManager] config.json 读取失败，回退到 .env 默认值: {e}")
         return {}
 
@@ -150,8 +154,17 @@ class ConfigManager:
                 val = incoming.get(field)
                 if val is None or val == "":
                     continue
-                if field == "api_key" and val == "****":
+                if not isinstance(val, str):
+                    raise ValueError(f"{section}.{field} 必须是字符串")
+                val = val.strip()
+                if not val:
+                    continue
+                if field == "api_key" and "****" in val:
                     continue  # 用户没改，保留旧值
+                if field == "base_url":
+                    url = urlparse(val)
+                    if url.scheme not in ("http", "https") or not url.netloc or url.username or url.password:
+                        raise ValueError(f"{section}.base_url 必须是有效的 HTTP(S) API 地址，不能含凭证")
                 existing[section][field] = val
 
         _write_config_file(existing)

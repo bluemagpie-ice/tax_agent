@@ -15,6 +15,7 @@ from typing import Any, Optional
 import logging
 
 from agents.base_context import BaseContext
+from services.security import checkpoint_thread_id
 
 # LangGraph 状态持久化（checkpointer）—— 使用 AsyncSqliteSaver 适配 FastAPI 异步模型
 # AsyncSqliteSaver 接受 aiosqlite.Connection，兼容 graph.astream() 调用的 async 方法
@@ -68,8 +69,8 @@ def _get_shared_memory() -> "ConversationMemory":
                 timeout=30.0,
                 max_retries=2,
             ))
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug("标题模型不可用（%s），回退为消息截断", type(e).__name__)
         return _conversation_memory
 
 class BaseAgent(ABC):
@@ -187,7 +188,7 @@ class BaseAgent(ABC):
 
         config = {
             "configurable": {
-                "thread_id": context.thread_id,
+                "thread_id": checkpoint_thread_id(context.thread_id),
                 "uid": context.uid,
             },
             "recursion_limit": kwargs.get("recursion_limit", 50),
@@ -224,7 +225,7 @@ class BaseAgent(ABC):
 
         config = {
             "configurable": {
-                "thread_id": context.thread_id,
+                "thread_id": checkpoint_thread_id(context.thread_id),
                 "uid": context.uid,
             },
             "recursion_limit": kwargs.get("recursion_limit", 50),
@@ -233,6 +234,8 @@ class BaseAgent(ABC):
         initial_state: dict = {"messages": messages}
         if hasattr(context, "source_types") and getattr(context, "source_types"):
             initial_state["source_types"] = getattr(context, "source_types")
+        initial_state["source_types"] = (input_context or {}).get("source_types")
+        initial_state["query_date"] = (input_context or {}).get("query_date")
 
         return await graph.ainvoke(initial_state, config=config)
 
@@ -250,7 +253,7 @@ class BaseAgent(ABC):
             if not getattr(graph, "checkpointer", None):
                 return []
 
-            config = {"configurable": {"thread_id": thread_id}}
+            config = {"configurable": {"thread_id": checkpoint_thread_id(thread_id)}}
             state = await graph.aget_state(config)
             if not state:
                 return []
@@ -281,11 +284,35 @@ class BaseAgent(ABC):
         if self._checkpointer is None:
             return False
         try:
-            await self._checkpointer.adelete_thread(thread_id)
+            await self._checkpointer.adelete_thread(checkpoint_thread_id(thread_id))
             return True
         except Exception as e:
             logging.warning(f"[{self.__class__.__name__}] 删除 checkpointer 线程失败: {e}")
             return False
+
+    async def _prune_checkpoints(self, thread_id: str, keep_recent: int = 3) -> None:
+        """只保留最近 keep_recent 个 checkpoint，删除旧的，防止 SQLite 膨胀拖慢读写。"""
+        if self._checkpointer is None:
+            return
+        try:
+            conn = getattr(self._checkpointer, "conn", None) or getattr(self._checkpointer, "_conn", None)
+            if conn is None:
+                return
+            await conn.execute(
+                "DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_id NOT IN ("
+                "SELECT checkpoint_id FROM checkpoints WHERE thread_id = ? "
+                "ORDER BY checkpoint_id DESC LIMIT ?)",
+                (thread_id, thread_id, keep_recent),
+            )
+            await conn.execute(
+                "DELETE FROM writes WHERE thread_id = ? AND checkpoint_id NOT IN ("
+                "SELECT checkpoint_id FROM checkpoints WHERE thread_id = ?)",
+                (thread_id, thread_id),
+            )
+            await conn.commit()
+            await conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception as exc:
+            logging.warning("旧 checkpoint 清理失败（%s），当前会话仍保留", type(exc).__name__)
 
     # ------------------------------------------------------------
     # 长记忆方法（委托给全局 ConversationMemory 单例）

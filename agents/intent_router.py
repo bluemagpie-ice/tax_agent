@@ -150,8 +150,8 @@ class HybridIntentRouter:
                 "matched_keywords": [],
             }
 
-        # 多 Agent 协作：选出得分不低于主意图 68% 的其他意图（最多 4 个）
-        collaboration_floor = max(0.25, primary["score"] * 0.68)
+        # 多 Agent 协作：选出得分不低于主意图 85% 的其他意图（最多 4 个）
+        collaboration_floor = max(0.25, primary["score"] * 0.85)
         selected = [
             item
             for item in scored
@@ -186,28 +186,39 @@ class HybridIntentRouter:
     def _complete_collaboration(
         self, agents: List[str], message: str, primary_intent: str
     ) -> List[str]:
-        # 税务默认协作链：知识 → 发票 → 计算 → 申报 → 合规
-        default_chain = [
-            "knowledge_agent",
-            "invoice_agent",
-            "calculation_agent",
-            "filing_agent",
-            "compliance_agent",
-            "planning_agent",
+        """按需激活子 Agent：只包含意图分类命中的 agent + 关键词触发的 agent + knowledge_agent。
+        不再无条件串行调用全部 Agent，避免每次请求都跑 6+ 个 Agent 导致长时间等待。"""
+        lowered = message.lower()
+
+        selected: List[str] = list(dict.fromkeys(agents))
+
+        # 关键词 → agent 映射（按优先级排列）
+        keyword_map: List[tuple] = [
+            (("计算", "帮我算", "算税", "应纳税额是多少", "要交多少", "预扣多少"), "calculation_agent"),
+            (("发票", "抬头", "专票", "普票", "红字", "开票", "报销", "认证", "抵扣联"), "invoice_agent"),
+            (("申报", "报税", "汇算", "补税", "退税", "汇缴", "年度申报", "申报表", "申报期"), "filing_agent"),
+            (("合规", "风险", "稽查", "处罚", "自查", "违规", "整改", "滞纳金"), "compliance_agent"),
+            (("筹划", "优化", "方案", "节税", "避税", "架构", "重组"), "planning_agent"),
         ]
 
-        # 根据消息关键词动态插入/追加
-        lowered = message.lower()
-        if any(term in lowered for term in ("筹划", "优化", "方案", "结构", "避税")):
-            default_chain.append("planning_agent")
-        if any(term in lowered for term in ("申报", "报税", "汇算", "补税", "退税")):
-            default_chain.append("filing_agent")
-        if any(term in lowered for term in ("发票", "抬头", "专票", "红字", "抵扣")):
-            default_chain.insert(0, "invoice_agent")
+        for keywords, agent_name in keyword_map:
+            if any(term in lowered for term in keywords):
+                if agent_name not in selected:
+                    selected.append(agent_name)
 
-        target_size = 8 if primary_intent != "general_tax" else 6
-        merged = list(dict.fromkeys([*agents, *default_chain]))
-        return merged[: max(target_size, min(len(merged), 10))]
+        # 每个专业 Agent 已带 RAG；仅明确同时要求政策解释时增加知识 Agent。
+        if not selected:
+            selected.append("knowledge_agent")
+        if selected == ["tax_agent"]:
+            selected.append("knowledge_agent")
+
+        # 合并意图分类命中的 agent（去重，保持顺序）
+        for a in agents:
+            if a not in selected:
+                selected.append(a)
+
+        # 上限保护：最多 4 个 Agent
+        return selected[:4]
 
     # --------------------------------------------------------------- #
     # 3. 协作计划（税务版）

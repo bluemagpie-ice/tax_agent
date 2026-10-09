@@ -1,0 +1,33 @@
+# Python 3.12；现有主流程直接使用的依赖，不导出整份开发环境。
+fastapi==0.141.1
+uvicorn==0.53.0
+Jinja2==3.1.6
+python-multipart==0.0.32
+python-dotenv==1.2.2
+pydantic==2.13.4
+langchain-core==1.6.0
+langchain-openai==1.6.0
+langchain-community==0.4.2
+langchain-text-splitters==1.1.2
+langgraph==1.2.10
+langgraph-checkpoint-sqlite==3.1.1
+aiosqlite==0.22.1
+openai==2.53.0
+qdrant-client==1.19.0
+numpy==2.3.5
+rank-bm25==0.2.2
+jieba==0.42.1
+SQLAlchemy==2.0.51
+requests==2.34.2
+beautifulsoup4==4.15.0
+httpx==0.28.1
+pytest==9.1.1
+python-docx==1.2.0
+pandas==3.0.5
+tabulate==0.10.0
+docling==2.115.0
+# 已有 PDF 解析代码所需；原开发环境漏装。
+pypdf>=5,<7
+# OCR/图检索为可选能力；不影响文本知识库和联网问答启动。
+# OCR 需自行配置 PaddleOCR/PaddlePaddle 及扫描 PDF 所需的 Poppler。
+# Neo4j 仅在自行配置服务后启用。

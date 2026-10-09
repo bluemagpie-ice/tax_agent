@@ -37,6 +37,7 @@ from langgraph.graph import add_messages, StateGraph, START, END
 
 from agents.base_agent import BaseAgent
 from agents.base_context import BaseContext
+from agents.streaming import invoke_answer
 from knowledge.embedding import EmbeddingService, PersistentDocumentStore
 
 load_dotenv()
@@ -80,21 +81,22 @@ class RAGSubAgent(BaseAgent):
         super().__init__(workdir_root, **kwargs)
 
         # LLM 配置
+        import httpx
         llm_cfg = ConfigManager().get_llm_config()
         self.llm = ChatOpenAI(
             model=llm_cfg["model"],
             api_key=llm_cfg["api_key"],
             base_url=llm_cfg["base_url"],
             temperature=0.3,
-            timeout=60.0,
-            max_retries=3,
+            timeout=httpx.Timeout(connect=10.0, read=45.0, write=10.0, pool=5.0),
+            max_retries=2,
         )
 
-        # RAG 服务初始化
+        # RAG 服务初始化（skip_rebuild=True：Qdrant 已在启动时完成数据入库，Agent 只需检索）
         try:
-            logging.info(f"[{self._log_prefix}] 正在加载知识库和 Embedding 服务...")
+            logging.info(f"[{self._log_prefix}] 正在加载知识库和 Embedding 服务（复用已有索引）...")
             self._store = PersistentDocumentStore()
-            self._embedding_service = EmbeddingService(store=self._store, use_qdrant=True)
+            self._embedding_service = EmbeddingService(store=self._store, use_qdrant=True, skip_rebuild=True)
             logging.info(f"[{self._log_prefix}] RAG 服务加载成功")
         except Exception as e:
             logging.warning(f"[{self._log_prefix}] RAG 服务加载失败（后续检索将降级）: {e}")
@@ -148,7 +150,7 @@ class RAGSubAgent(BaseAgent):
             # 排序：现行有效优先 + effective_date 降序
             raw_results.sort(
                 key=lambda x: (
-                    0 if (x.get("effective_date") and x.get("is_current") is not False) else 1,
+                    0 if (x.get("is_current") is False or x.get("superseded_by")) else 1,
                     x.get("effective_date") or "",
                 ),
                 reverse=True,
@@ -211,7 +213,10 @@ class RAGSubAgent(BaseAgent):
         )
         full_messages = [system_msg] + state["messages"]
 
-        response = self.llm.invoke(full_messages)
+        import time as _time
+        t0 = _time.time()
+        response = invoke_answer(self.llm, full_messages)
+        logging.info(f"[{self._log_prefix}] LLM 调用完成，耗时 {_time.time() - t0:.1f}s")
 
         return {
             "messages": [response],
@@ -231,7 +236,7 @@ class RAGSubAgent(BaseAgent):
         builder = StateGraph(self.STATE_CLASS)
         builder.add_node(self.NODE_NAME, self._rag_node)
         builder.add_edge(START, self.NODE_NAME)
-        builder.add_conditional_edge(self.NODE_NAME, self.should_continue)
+        builder.add_conditional_edges(self.NODE_NAME, self.should_continue)
 
         self.graph = builder.compile(checkpointer=self.checkpointer)
         return self.graph

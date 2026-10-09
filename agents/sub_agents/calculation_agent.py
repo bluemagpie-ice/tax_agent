@@ -27,6 +27,7 @@ from langchain_openai import ChatOpenAI
 
 from services.config_manager import ConfigManager
 from agents.sub_agents.rag_sub_agent import RAGSubAgent
+from agents.streaming import invoke_answer
 from services.calculators import (
     calculate_vat,
     calculate_corporate_income_tax,
@@ -81,6 +82,13 @@ class CalculationAgent(RAGSubAgent):
 
 用户问题：
 {query}
+
+字段名必须匹配计算器：vat 使用 taxpayer_type(general/small)、sales_amount(不含税销售额，单位元)、sales_is_inclusive、input_tax(进项税额，单位元)、vat_rate(如13%填0.13)、quarterly_sales。
+corporate_income 使用 tax_type(normal/small_low_profit/high_tech)、taxable_income、prior_loss、rd_expense、direct_deduction。
+individual_annual 使用 annual_wage、annual_labor、annual_royalty、annual_author_fee、special_deduction、special_additional_deduction、other_deduction、paid_tax。
+monthly_withholding 使用 monthly_wage、month_index、special_deduction_monthly、special_additional_monthly、prior_tax_withheld、prior_income。
+business_income 使用 annual_profit、special_additional_deduction；surcharges 使用 vat_paid、consumption_tax_paid、city_type(urban/county/other)、is_small_scale。
+stamp_duty 使用 category、contract_amount、is_small_scale。不要把进项采购金额直接当作进项税额。
 """
 
     # ---- 第二步：最终答复 Prompt（覆盖父类，增加精确计算结果注入） ----
@@ -141,13 +149,14 @@ class CalculationAgent(RAGSubAgent):
 
         # 参数提取用 LLM（和主 LLM 共用配置，可用更便宜的模型）
         llm_cfg = ConfigManager().get_llm_config()
+        import httpx
         self.extract_llm = ChatOpenAI(
             model=kwargs.get("extract_model_id") or llm_cfg["model"] or "glm-4-flash",
             api_key=kwargs.get("extract_api_key") or llm_cfg["api_key"],
             base_url=kwargs.get("extract_base_url") or llm_cfg["base_url"],
             temperature=0.0,  # 参数提取要绝对确定，temperature=0
-            timeout=60.0,
-            max_retries=3,
+            timeout=httpx.Timeout(connect=10.0, read=45.0, write=10.0, pool=5.0),
+            max_retries=2,
         )
 
     # ==============================================================
@@ -173,7 +182,7 @@ class CalculationAgent(RAGSubAgent):
             return handler().to_dict()
         except TypeError as e:
             # 参数缺失 / 类型错误
-            logger.warning(f"[CalculationAgent] 计算器参数错误 ({calculator_type}): {e}, params={params}")
+            logger.warning("[CalculationAgent] 计算器参数错误 (%s): %s", calculator_type, type(e).__name__)
             return None
         except Exception as e:
             logger.error(f"[CalculationAgent] 计算器执行异常 ({calculator_type}): {e}", exc_info=True)
@@ -210,7 +219,7 @@ class CalculationAgent(RAGSubAgent):
 
             logger.info(
                 f"[CalculationAgent] 参数提取 → calculator={calc_type}, "
-                f"params={raw_params}"
+                f"parameter_count={len(raw_params)}"
             )
 
             calc_dict = self._run_calculator(calc_type, raw_params)
@@ -219,7 +228,7 @@ class CalculationAgent(RAGSubAgent):
                 calculation_result_dict = self._format_calc_result_for_prompt(calc_dict)
                 logger.info(
                     f"[CalculationAgent] 精确计算完成 → "
-                    f"tax_amount={calc_dict.get('tax_amount')}"
+                    f"calculator={calc_type}"
                 )
             else:
                 calculation_result_dict = "（精确计算执行失败，以下为基于检索到的政策条文的解释）"
@@ -227,7 +236,7 @@ class CalculationAgent(RAGSubAgent):
             calculation_result_dict = "（用户问题不涉及具体计算，以下为基于检索到的政策条文的解释）"
 
         # 4. RAG 检索（继承父类方法）
-        retrieved_context = self.retrieve_context(user_query)
+        retrieved_context = self.retrieve_context(user_query, source_types=state.get("source_types"), query_date=state.get("query_date"))
 
         # 5. 拼 SystemMessage（注入精确计算结果 + RAG 上下文）
         system_msg = SystemMessage(
@@ -240,7 +249,7 @@ class CalculationAgent(RAGSubAgent):
         full_messages = [system_msg] + state["messages"]
 
         # 6. LLM 生成最终解释
-        response = self.llm.invoke(full_messages)
+        response = invoke_answer(self.llm, full_messages)
 
         return {
             "messages": [response],
@@ -267,9 +276,14 @@ class CalculationAgent(RAGSubAgent):
                 text = text[3:]
             text = text.rstrip("```").strip()
 
-            return json.loads(text)
+            result = json.loads(text)
+            if not isinstance(result, dict) or not isinstance(result.get("calculator_type"), str):
+                return None
+            if not isinstance(result.get("params", {}), dict):
+                return None
+            return result
         except Exception as e:
-            logger.warning(f"[CalculationAgent] 参数提取失败: {e}, query={query}")
+            logger.warning("[CalculationAgent] 参数提取失败: %s", type(e).__name__)
             return None
 
     @staticmethod

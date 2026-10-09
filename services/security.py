@@ -18,6 +18,29 @@ from typing import Any, Dict, Optional
 # 租户上下文变量；默认值 "default" 表示尚未绑定具体租户，
 # 此时任何受租户保护的写入都应被拒绝。
 _tenant_context: ContextVar[str] = ContextVar("tenant_id", default="default")
+document_session: ContextVar[str] = ContextVar("document_session", default="")
+blocked_document_ids = set()
+
+
+def document_visible(metadata: dict) -> bool:
+    """RAG 文档权限：系统资料共享；用户文件必须有归属，单次文件限定会话。"""
+    if metadata.get("file_id") in blocked_document_ids:
+        return False
+    if metadata.get("status", "active") != "active":
+        return False
+    if metadata.get("source_type") == "default" or metadata.get("scope") == "system":
+        return True
+    owner = metadata.get("owner_id")
+    if not owner or str(owner) != current_tenant_id():
+        return False
+    return metadata.get("scope") == "global" or (
+        metadata.get("scope") == "session" and bool(document_session.get())
+        and metadata.get("session_id") == document_session.get())
+
+
+def checkpoint_thread_id(thread_id: str) -> str:
+    tenant = current_tenant_id()
+    return f"{tenant}:{thread_id}" if tenant != "default" else thread_id
 
 # 公共可见的租户占位 —— 用于标识"租户无关"的公开数据
 _PUBLIC_TENANT = "public"

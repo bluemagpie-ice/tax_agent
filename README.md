@@ -11,7 +11,7 @@
 - **Embedding**：SiliconFlow（`BAAI/bge-large-zh-v1.5`，1024 维）
 - **存储**：SQLite（SQLAlchemy 业务表 + 原生键值存储层）
 - **文档解析/OCR**：Docling、PyPDF、PaddleOCR
-- **联网检索**：DuckDuckGo（财政部/税务总局定向）
+- **联网检索**：Bing（财政部/税务总局定向，无需搜索 API Key）
 
 ## 核心能力
 
@@ -21,24 +21,32 @@
 4. **跨会话记忆**：工作记忆 + 会话摘要压缩 + 用户画像（跨会话聚合），按租户物理隔离，乐观锁防并发覆盖。
 5. **时效性触发联网检索**：用户问「最新/最近政策」时自动触发联网实时检索并注入回答，而非只查本地库。
 6. **政策自动更新**：本地目录 / 国家税务总局法规库爬取 → 去重 → 增量入库，后台定时扫描。
-7. **离线评估框架**：内置 22 条评测集，量化意图准确率 / 关键词召回率 / 拒答正确率。
+7. **离线评估框架**：内置 23 条评测集，量化意图准确率 / 关键词召回率 / 拒答正确率。
 8. **增量索引**：上传新文档只向量化新增块，不重算全库。
 
 ## 快速开始
 
-```bash
-# 1. 配置环境变量（复制 .env.example 为 .env 并填写密钥）
-#    LLM / Embedding / Qdrant 三组配置
+Windows PowerShell，先安装 Python 3.12，并进入项目根目录：
 
-# 2. 启动服务
-.venv/Scripts/python.exe -m uvicorn web.main:app --reload
+```powershell
+# 1. 创建环境并安装已有功能所需依赖
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# 2. 首次配置；已有 .env 时跳过复制，避免覆盖密钥
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+# LLM 可在首页 ⚙ 弹窗填模型 ID、API Key、Base URL。
+# RAG 还需在 .env 填 Qdrant 地址/密钥、VECTOR_SIZE，并配置 Embedding。
+
+# 3. 启动服务（--host / --port 可按需调整）
+.\.venv\Scripts\python.exe -m uvicorn web.main:app --host 127.0.0.1 --port 8000
 # 打开 http://127.0.0.1:8000
 
-# 3. 运行测试（232 通过 + 1 集成测试默认跳过）
-.venv/Scripts/python.exe -m pytest tests/ -q --ignore=_snapshot_20261006_164141
+# 4. 运行测试；以本次输出为准，外部服务的 Mock 测试不代表真实端到端通过
+.\.venv\Scripts\python.exe -m pytest tests/ -q
 
-# 4. 离线评估（意图路由，无需 LLM/Qdrant）
-.venv/Scripts/python.exe -m eval.run_eval --mode intent
+# 5. 离线评估（意图路由，无需 LLM/Qdrant）
+.\.venv\Scripts\python.exe -m eval.run_eval --mode intent
 ```
 
 ## 目录结构
@@ -55,15 +63,63 @@ tests/            测试（pytest）
 
 ## 配置与鉴权
 
-- 模型/Embedding 配置：前端设置页写入 `data/config.json`，回退 `.env`。
+- 模型/Embedding 配置：首页侧栏 ⚙ 弹窗支持填写任意兼容 OpenAI 接口的模型 ID、API Key、Base URL；写入 `data/config.json`，回退 `.env`。保存后更新已有模型客户端，下次对话生效；API Key 留空保留旧值。配置为服务级设置，适用于本地演示。
 - 鉴权：请求头 `Authorization: Bearer <token>`。
   - `AUTH_USER_TOKEN`：普通用户（默认 `test_token_123`）
-  - `DEVELOPER_TOKEN`：开发者，可看到设置/政策面板（回退 `AUTH_ADMIN_TOKEN` / `admin_token_456`）
+  - `DEVELOPER_TOKEN`：开发者，可使用政策面板（回退 `AUTH_ADMIN_TOKEN` / `admin_token_456`）；普通演示用户也可打开模型配置弹窗。
   - 仅演示用途，生产环境请替换为真实鉴权。
+
+## 业务场景与演示
+
+面向中小企业财税人员和税务咨询顾问，解决政策资料分散、计算口径易混淆、重复咨询缺少上下文的问题。定位为资料检索与计算辅助，正式申报由财税人员核对政策原文和业务条件。
+
+1. 知识问答：配置 LLM、Embedding 和 Qdrant，启动时预置 Markdown 自动入库；若启动时尚未配置 RAG，配置后上传 `knowledge/presets/` 中的文件，再问“什么是进项税”。
+2. 计算闭环：问“我是增值税一般纳税人，本月不含税销售额 100000 元，税率 13%，进项税额 8000 元，帮我算应纳税额”。计算模块在这些明确假设下输出 5000 元，LLM 负责参数提取和解释。
+3. 联网闭环：勾选“联网检索最新政策”，问“增值税”；先搜索并读取前两页正文，模型还可按需要调用搜索和网页读取工具，最多两轮工具补充。用户提供链接时直接读取；来源注明“已读取正文”或“仅摘要或读取失败”。无需把本轮资料写入 Qdrant；无匹配或网络失败会明确提示。Bing HTML 无官网结果时尝试 RSS，仍可能受网络和搜索质量影响。
+4. 记忆演示：同一会话继续提问，再重启服务，从侧栏打开历史；会话保存在本地 SQLite，记忆只保存原始问题及最终回答，不反复存入检索背景。
+
+首页先显示处理状态，正文随模型生成通过 SSE 即时输出；参数提取和多 Agent 中间结果不作为正文输出。等待期间发送保活事件，日志记录首字与总耗时。页面会话标题直接截取原始问题，避免额外等待一次模型调用。
+
+## 文档管理与删除演示
+
+- 首页 📄 打开“我的文档”，可预览解析文本、按全局/会话筛选并删除。全局文件只用于上传者的所有对话；会话文件只用于指定对话，删除对话时一起清理。文件保存在本机 `uploads/`，分块保存在本地 JSON/SQLite 和 Qdrant Cloud。
+- 上传前可选“仅当前对话”或“我的所有对话”；空对话也可先上传。普通用户看不到管理员的系统资料，系统资料用于 RAG 检索，并未微调模型。
+- 历史无归属文档不自动认领，先隔离；管理员在文档页勾选管理选项可查看和删除。管理员可“同步云端清单”发现仅存于 Qdrant 的资料；云端只有分块时预览分块文本，无法还原已丢失的原文件。
+- 删除按 `file_id` 清理 Qdrant 向量和文本 payload，等待完成并检查剩余数量，再清理本地分块、原文、SQL 记录、检索缓存与相关会话上下文。失败保留 `delete_failed` 记录，可重试；上传失败保留隔离记录，也可删除后重新上传。
+- 管理员删除预置资料时保留仓库原始素材，但记录停用，重启不会自动重新入库。历史聊天仍可浏览，删除资料相关的旧上下文不再参与后续回答。
+- 演示鉴权仍是两个 Token；实际多人部署需接入真实账号。浏览器每个标签页使用当前访问 Token，不提供匿名文档查询。
+
+## 简单数据与选型取舍
+
+2026-10-08 本机离线运行：意图命中 **23/23**，整组路由耗时约 **22 ms**。这是小型内置样本上的路由指标，不是税务答案准确率，也不包含网络或 LLM 延迟。真实 Bing 定向检索“增值税”单次约 **0.57 秒**，返回 1 条税务局域名结果；网络环境和查询词会影响结果数量与延迟。
+
+2026-10-09 真实 GLM-5.3 同题单次对比：“你好，请用一句话介绍你能帮我做什么。”从首字 15.36 秒/总计 16.55 秒降至 2.73 秒/5.16 秒；同时改了首轮复用与推理档位，未经重复采样或负载控制，不能归因到单项或保证每次相同。真实联网对话完成一次（37.20 秒，含搜索工具与来源）；增值税示例完成一次（21.36 秒，回答含计算结果 5000 元）。
+
+成本按调用次数估算：单知识问答通常 1 次主 LLM 调用；计算通常 1 次参数提取 + 1 次解释；多个子 Agent 协作另加 1 次汇总。网页工具调用会增加模型轮数；页面标题不额外调用模型。金额取决于实际模型价格和输入输出 token，本项目未测算真实费用。
+
+保留现有 FastAPI、LangGraph、Qdrant 和 SQLite：编排与检索已具备演示能力，SQLite 足以支持本地单机持久化。意图路由使用关键词与相似度，减少额外模型调用；仅多 Agent 输出时汇总，单 Agent 直接返回。现阶段不增加队列、缓存、微服务或额外编排框架，以降低部署与讲解成本。
+
+独立子 Agent 最多两个并发，结果按路由顺序汇总；每个专业 Agent 已能检索资料，避免为了“进项税/所得税”等名词重复调计算和知识 Agent。参考 [LangGraph 流式输出](https://docs.langchain.com/oss/python/langgraph/streaming)、[Dify 并行分支](https://dify.ai/zh/blog/accelerating-workflow-processing-with-parallel-branch) 的做法，复用现有框架；并发会提高瞬时调用量，不保证所有问题都更快。
+
+GLM-5.3 的最终答复使用 `reasoning_effort=low` 减少默认深度推理的等待，保留思考和工具能力；其他模型不发送此选项。依据 [GLM-5.3 官方参数文档](https://docs.z.ai/guides/llm/glm-5.3)，该模型无法关闭思考。参数提取和纯函数计算流程保留。
+
+`tests/test_runtime_document_flow.py` 使用真实 Qdrant 本地引擎和临时 SQLite 验证隔离与删除，模型流和故障由可控替身模拟，不操作用户云端资料。2026-10-09 另用自建临时验收文档实测 Qdrant Managed Cloud 上传、浏览和删除，向量由 1 条降到 0 条；临时文档和所属对话已清理。
+
+扩展方向：增加人工核验的真实咨询样本、评估引用与答案准确性；需要多人实际使用时再替换演示鉴权、细化配置权限；政策更新规模扩大后再考虑更完善的任务管理。
+
+## 常见问题
+
+- 页面能开但对话返回 503：打开 ⚙，补齐模型 ID、API Key、Base URL；服务商必须提供兼容 OpenAI 的接口。
+- 自定义 Token 后访问失败：在 ⚙ 弹窗填写与 `.env` 对应的访问 Token，再保存；API Key 是模型密钥，访问 Token 是本项目鉴权凭证。
+- 联网无结果：检查本机能否访问 Bing、代理设置和关键词；代码有 HTTP 状态校验、超时和无结果提示，可通过 `WEB_SEARCH_URL` 覆盖搜索地址。结果为空不代表模型已查证最新政策。
+- RAG 检索不可用：检查 Embedding 密钥、Qdrant 地址、网络和 `VECTOR_SIZE`。更换向量模型时必须保持原索引维度一致；已有文档需重新上传，避免混用不同模型的向量。
+- PDF 提示缺少 `pypdf`：按快速开始安装 `requirements.txt`；原开发环境未安装该运行依赖。
+- 图片/扫描 PDF OCR 为可选能力，需要单独配置 PaddleOCR、PaddlePaddle、模型文件；扫描 PDF 还需 `pdf2image` 和系统 Poppler。本次未安装或验证真实 OCR 引擎，演示优先使用 Markdown、TXT 或文本版 PDF。
+- `pass`/TODO 有一部分是抽象接口、开发笔记和扩展入口；`/api/tax` 明确为预留接口，不用于本次演示闭环。
 
 ## 已知待办（README 版）
 
-- SQLAlchemy 业务表缺少 schema 迁移（Alembic）。
+- SQLite 旧文档表启动时只补齐 `business_id`、`file_name`、`chunk_count`，保留旧行；更广泛的 schema 迁移仍未实现。
 - 记忆无 PII 脱敏。
 - 政策变更的文本级 diff 尚未真正实现（需存旧快照）。
 - `web/templates/training.html` 政策面板代码被复制了三份，待去重。

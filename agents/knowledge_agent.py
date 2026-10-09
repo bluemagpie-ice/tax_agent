@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 
 from agents.base_agent import BaseAgent
 from agents.base_context import BaseContext
+from agents.streaming import invoke_answer
 
 # 加载 .env 环境变量
 load_dotenv()
@@ -80,21 +81,22 @@ class KnowledgeAgent(BaseAgent):
         self.definition_agent = DefinitionAgent(workdir_root=workdir_root)
 
         # ---- LLM 配置 ----
+        import httpx
         llm_cfg = ConfigManager().get_llm_config()
         self.llm = ChatOpenAI(
             model=llm_cfg["model"],
             api_key=llm_cfg["api_key"],
             base_url=llm_cfg["base_url"],
             temperature=0.7,
-            timeout=60.0,
-            max_retries=3,
+            timeout=httpx.Timeout(connect=10.0, read=45.0, write=10.0, pool=5.0),
+            max_retries=2,
         )
 
-        # ---- RAG 服务初始化 ----
+        # ---- RAG 服务初始化（skip_rebuild=True：Qdrant 已有数据，Agent 只做检索） ----
         try:
-            logger.info("正在加载知识库和 Embedding 服务...")
+            logger.info("正在加载知识库和 Embedding 服务（复用已有索引）...")
             self._store = PersistentDocumentStore()
-            self._embedding_service = EmbeddingService(store=self._store, use_qdrant=True)
+            self._embedding_service = EmbeddingService(store=self._store, use_qdrant=True, skip_rebuild=True)
             logger.info("RAG 服务加载成功")
         except Exception as e:
             logger.warning(f"RAG 服务加载失败（后续检索将降级）: {e}")
@@ -135,7 +137,7 @@ class KnowledgeAgent(BaseAgent):
 
             raw_results.sort(
                 key=lambda x: (
-                    0 if (x.get("effective_date") and x.get("is_current") is not False) else 1,
+                    0 if (x.get("is_current") is False or x.get("superseded_by")) else 1,
                     x.get("effective_date") or "",
                 ),
                 reverse=True,
@@ -197,7 +199,10 @@ class KnowledgeAgent(BaseAgent):
         full_messages = [system_msg] + state["messages"]
 
         # 4. 调用 LLM
-        response = self.llm.invoke(full_messages)
+        import time as _time
+        t0 = _time.time()
+        response = invoke_answer(self.llm, full_messages)
+        logger.info(f"[KnowledgeAgent] LLM 调用完成，耗时 {_time.time() - t0:.1f}s")
 
         # 5. 返回更新后的状态
         return {
