@@ -92,8 +92,18 @@
         const uploadArea = document.getElementById('upload-area');
         const fileInput = document.getElementById('file-input');
         const fileList = document.getElementById('file-list');
-        // 与后端 main.py 鉴权逻辑对齐
-        const AUTH_TOKEN = 'Bearer ' + (sessionStorage.getItem('tax_agent_auth_token') || 'test_token_123');
+        // 与后端 main.py 鉴权逻辑对齐（角色双Token体系）
+        const DEFAULT_USER_TOKEN = 'test_token_123';
+        const DEFAULT_ADMIN_TOKEN = 'admin_token_456';
+        const currentRole = sessionStorage.getItem('tax_agent_role') || 'user';
+        function getTokenForRole(role) {
+            const stored = sessionStorage.getItem('tax_agent_' + role + '_token');
+            return stored || (role === 'admin' ? DEFAULT_ADMIN_TOKEN : DEFAULT_USER_TOKEN);
+        }
+        function getAuthToken() {
+            return 'Bearer ' + getTokenForRole(currentRole);
+        }
+        let AUTH_TOKEN = getAuthToken();
 
         uploadArea.onclick = () => fileInput.click();
         uploadArea.ondragover = e => { e.preventDefault(); uploadArea.classList.add('dragover'); };
@@ -225,6 +235,7 @@
                 if (user.is_developer) {
                     document.getElementById('admin-documents').hidden = false;
                     document.getElementById('upload-scope').add(new Option('管理员系统资料', 'system'));
+                    document.getElementById('include-system').checked = true;
                 }
                 const listResponse = await fetch('/api/conversations', {headers:{'Authorization':AUTH_TOKEN}});
                 const data = await listResponse.json();

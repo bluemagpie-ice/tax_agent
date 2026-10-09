@@ -248,6 +248,34 @@
         }
         .toast.error { background: #e5484d; }
 
+        /* 角色徽章 & 下拉 */
+        .role-badge-wrapper { position: relative; }
+        .role-badge {
+            display: flex; align-items: center; gap: 5px;
+            padding: 5px 10px; border-radius: 8px;
+            border: 1px solid var(--border); background: var(--bg);
+            color: var(--text); font-size: 13px; cursor: pointer;
+            white-space: nowrap;
+        }
+        .role-badge:hover { background: var(--hover); }
+        .role-badge.admin { border-color: #e6a817; background: #fff8e6; }
+        [data-theme="dark"] .role-badge.admin { background: #2a2510; }
+        .role-arrow { font-size: 10px; color: var(--text-dim); }
+        .role-dropdown {
+            display: none; position: absolute; top: 100%; right: 0;
+            margin-top: 4px; min-width: 150px;
+            background: var(--bg); border: 1px solid var(--border);
+            border-radius: 10px; box-shadow: 0 4px 16px rgba(0,0,0,.12);
+            z-index: 100; overflow: hidden;
+        }
+        .role-dropdown.show { display: block; }
+        .role-option {
+            padding: 10px 14px; font-size: 13px; cursor: pointer;
+            display: flex; align-items: center; gap: 6px;
+        }
+        .role-option:hover { background: var(--hover); }
+        .role-option.active { background: var(--primary-soft); font-weight: 500; }
+
         /* 设置弹窗 */
         .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 1000; justify-content: center; align-items: center; }
         .modal-overlay.show { display: flex; }
@@ -287,7 +315,7 @@
                 <button class="icon-btn" id="settings-btn" onclick="showSettings()" title="模型配置">⚙</button>
                 <button class="icon-btn" onclick="location.href='/knowledge?session_id='+encodeURIComponent(currentSessionId)" title="我的文档：浏览与删除">📄</button>
                 <span class="spacer"></span>
-                <span style="font-size:12px;color:var(--text-dim)" id="me-label"></span>
+                <span style="font-size:12px;color:var(--text-dim)" id="me-label">👤 普通用户</span>
             </div>
         </aside>
         <div class="sidebar-backdrop" id="sidebar-backdrop" onclick="toggleSidebar(false)"></div>
@@ -297,6 +325,15 @@
             <header class="main-header">
                 <button class="icon-btn" onclick="toggleSidebar()" title="折叠侧边栏">☰</button>
                 <div class="main-title" id="main-title">税务智能助手</div>
+                <div class="role-badge-wrapper">
+                    <button class="role-badge" id="role-badge" onclick="toggleRoleMenu(event)" title="点击切换用户/管理员模式">
+                        <span id="role-icon">👤</span> <span id="role-label">普通用户</span> <span class="role-arrow">▾</span>
+                    </button>
+                    <div class="role-dropdown" id="role-dropdown">
+                        <div class="role-option" data-role="user" onclick="switchRole('user')">👤 普通用户</div>
+                        <div class="role-option" data-role="admin" onclick="switchRole('admin')">🛡️ 管理员</div>
+                    </div>
+                </div>
                 <select class="model-select" id="model-select" onchange="onModelChange()"></select>
             </header>
 
@@ -313,6 +350,7 @@
 
             <div class="composer" id="composer">
                 <div class="composer-inner">
+                    <div id="workflow-panel" hidden style="padding:10px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px"></div>
                     <div class="composer-box" id="composer-box">
                         <button class="attach-btn" id="attach-btn" onclick="document.getElementById('file-input').click()" title="上传文件">📎</button>
                         <textarea id="user-input" rows="1" placeholder="输入你的税务问题…（Enter 发送，Shift+Enter 换行）"></textarea>
@@ -345,6 +383,10 @@
             <label>Base URL</label><input id="cfg-emb-url" type="text" placeholder="https://api.siliconflow.cn/v1">
             <label>访问 Token（自定义鉴权时填写，留空使用演示 Token）</label><input id="cfg-auth-token" type="password" autocomplete="off">
             <p style="font-size:12px;color:var(--text-dim)">模型设置对当前服务所有会话生效；API Key 留空保留原值。</p>
+            <div class="section-title" style="border-top:1px solid var(--border);padding-top:14px;margin-top:14px">🔑 身份认证 Token</div>
+            <label>普通用户 Token</label><input id="cfg-user-token" type="password" autocomplete="off" placeholder="test_token_123">
+            <label>管理员 Token</label><input id="cfg-admin-token" type="password" autocomplete="off" placeholder="admin_token_456">
+            <p style="font-size:12px;color:var(--text-dim);margin-top:4px">当前模式：<span id="cfg-current-role">—</span> — 保存后，在页面顶部角色按钮切换即可生效</p>
             <div class="btn-row">
                 <button class="btn btn-cancel" onclick="closeSettings()">取消</button>
                 <button class="btn btn-primary" onclick="saveSettings()">保存</button>
@@ -353,7 +395,19 @@
     </div>
 
     <script>
-        let AUTH_TOKEN = 'Bearer ' + (sessionStorage.getItem('tax_agent_auth_token') || 'test_token_123');
+        // ====== 角色/Token 管理 ======
+        const DEFAULT_USER_TOKEN = 'test_token_123';
+        const DEFAULT_ADMIN_TOKEN = 'admin_token_456';
+        let currentRole = sessionStorage.getItem('tax_agent_role') || 'user';
+
+        function getTokenForRole(role) {
+            const stored = sessionStorage.getItem('tax_agent_' + role + '_token');
+            return stored || (role === 'admin' ? DEFAULT_ADMIN_TOKEN : DEFAULT_USER_TOKEN);
+        }
+        function getAuthToken() {
+            return 'Bearer ' + getTokenForRole(currentRole);
+        }
+        let AUTH_TOKEN = getAuthToken();
         const chat = document.getElementById('chat');
         const chatInner = document.getElementById('chat-inner');
         const userInput = document.getElementById('user-input');
@@ -364,6 +418,69 @@
         let abortController = null;
         let autoScroll = true;
         let streaming = false;
+        let pendingWorkflow = null;
+
+        function showWorkflow(data) {
+            pendingWorkflow = data.pending || null;
+            const panel = document.getElementById('workflow-panel');
+            panel.replaceChildren();
+            panel.hidden = !pendingWorkflow && !(data.artifacts || []).length;
+            if (pendingWorkflow) {
+                const title = document.createElement('strong');
+                title.textContent = pendingWorkflow.kind === 'approval' ? '等待人工审批：' + pendingWorkflow.title : '请补充信息：' + pendingWorkflow.question;
+                panel.appendChild(title);
+                const preview = document.createElement('pre');
+                preview.textContent = pendingWorkflow.preview || '';
+                preview.style.cssText = 'white-space:pre-wrap;max-height:160px;overflow:auto';
+                panel.appendChild(preview);
+                const notice = document.createElement('p'); notice.textContent = pendingWorkflow.notice;
+                panel.appendChild(notice);
+                if (pendingWorkflow.kind === 'approval') {
+                    panel.appendChild(makeActionBtn('批准生成', () => resumeApproval(true)));
+                    panel.appendChild(makeActionBtn('拒绝并终止', () => resumeApproval(false)));
+                }
+            }
+            for (const item of data.artifacts || []) {
+                panel.appendChild(makeActionBtn('下载：' + item.title, () => downloadArtifact(item.id)));
+            }
+        }
+        async function refreshWorkflow() {
+            const sid = currentSessionId;
+            const resp = await fetch(`/api/conversations/${encodeURIComponent(sid)}/workflow`, {headers:{Authorization:AUTH_TOKEN}});
+            if (sid !== currentSessionId) return;
+            if (resp.status === 404) { showWorkflow({}); return; }
+            if (!resp.ok) { const error = await resp.json(); throw new Error(error.detail || '读取工作流失败'); }
+            showWorkflow(await resp.json());
+        }
+        async function resumeApproval(approved) {
+            if (streaming || !pendingWorkflow) return;
+            const sid = currentSessionId, pause = pendingWorkflow;
+            streaming = true;
+            const panel = document.getElementById('workflow-panel');
+            panel.querySelectorAll('button').forEach(b => b.disabled = true);
+            try {
+                const resp = await fetch(`/api/conversations/${encodeURIComponent(sid)}/resume`, {
+                    method:'POST', headers:{Authorization:AUTH_TOKEN,'Content-Type':'application/json'},
+                    body:JSON.stringify({id:pause.id,value:approved})});
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || '审批处理失败');
+                if (sid === currentSessionId) {
+                    const msg = appendMessage('assistant', data.answer);
+                    msg.bubble.innerHTML = renderMarkdown(data.answer);
+                    showWorkflow(data);
+                }
+            } catch (error) { showToast(error.message, true); }
+            finally { streaming = false; panel.querySelectorAll('button').forEach(b => b.disabled = false); loadConversations(); }
+        }
+        async function downloadArtifact(id) {
+            try {
+                const resp = await fetch(`/api/conversations/${encodeURIComponent(currentSessionId)}/artifacts/${encodeURIComponent(id)}`, {headers:{Authorization:AUTH_TOKEN}});
+                if (!resp.ok) { const error = await resp.json(); throw new Error(error.detail || '下载失败'); }
+                const url = URL.createObjectURL(await resp.blob());
+                const a = document.createElement('a'); a.href = url; a.download = 'filing-draft.json'; a.click();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+            } catch (error) { showToast(error.message, true); }
+        }
 
         // ---------- 主题 ----------
         function initTheme() {
@@ -526,8 +643,22 @@
             let lines = text.split('\n');
             let out = [];
             let inList = null;
-            for (let line of lines) {
+            for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+                const line = lines[lineIndex];
                 const trimmed = line.trim();
+                if (/^\|/.test(trimmed) && /^\|\s*:?-{3,}/.test((lines[lineIndex + 1] || '').trim())) {
+                    if (inList) { out.push(inList === 'ul' ? '</ul>' : '</ol>'); inList = null; }
+                    const cells = row => row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(s => s.trim());
+                    const headers = cells(line);
+                    out.push('<table><thead><tr>' + headers.map(s => '<th>' + inlineMarkup(s) + '</th>').join('') + '</tr></thead><tbody>');
+                    lineIndex++; // 已解析的分隔行不作为正文。
+                    while (lineIndex + 1 < lines.length && /^\|/.test(lines[lineIndex + 1].trim())) {
+                        const row = cells(lines[++lineIndex]);
+                        out.push('<tr>' + headers.map((_, i) => '<td>' + inlineMarkup(row[i] || '') + '</td>').join('') + '</tr>');
+                    }
+                    out.push('</tbody></table>');
+                    continue;
+                }
                 if (/^```/.test(trimmed)) { out.push(''); continue; }
                 if (/^###\s+/.test(trimmed)) { out.push('<h3>' + inlineMarkup(trimmed.replace(/^###\s+/, '')) + '</h3>'); continue; }
                 if (/^##\s+/.test(trimmed)) { out.push('<h2>' + inlineMarkup(trimmed.replace(/^##\s+/, '')) + '</h2>'); continue; }
@@ -543,7 +674,7 @@
                     continue;
                 }
                 if (inList) { out.push(inList === 'ul' ? '</ul>' : '</ol>'); inList = null; }
-                if (/^\|/.test(trimmed)) { out.push(''); continue; }
+                if (/^\|/.test(trimmed)) { out.push('<p>' + inlineMarkup(line) + '</p>'); continue; }
                 if (trimmed === '') { out.push(''); continue; }
                 out.push('<p>' + inlineMarkup(line) + '</p>');
             }
@@ -592,6 +723,7 @@
         // ---------- 发送 ----------
         async function sendMessage() {
             if (streaming) { abortController && abortController.abort(); return; }
+            if (pendingWorkflow?.kind === 'approval') { showToast('请先批准或拒绝待审批操作', true); return; }
             const text = userInput.value.trim();
             if (!text) return;
             userInput.value = '';
@@ -654,6 +786,8 @@
                             if (!thinkPanel) thinkPanel = addThinkPanel(assistantMsg.wrap);
                             thinkPanel.querySelector('.think-body').textContent = thinkText;
                             if (autoScroll) scrollToBottom();
+                        } else if (type === 'interrupt') {
+                            showWorkflow({pending:JSON.parse(dataStr)});
                         } else if (type === 'error') {
                             let error = dataStr;
                             try { const payload = JSON.parse(dataStr); error = payload.msg || payload; } catch (e) {}
@@ -683,6 +817,7 @@
                 sendBtn.classList.remove('stop');
                 userInput.focus();
                 loadConversations();
+                refreshWorkflow().catch(error => showToast(error.message, true));
             }
         }
 
@@ -729,8 +864,10 @@
             } catch (e) { console.error('加载会话失败', e); }
         }
         async function selectConversation(sessionId) {
+            if (streaming) { showToast('请先停止当前回复', true); return; }
             if (sessionId === currentSessionId) return;
             currentSessionId = sessionId;
+            showWorkflow({});
             localStorage.setItem('tax_agent_session_id', sessionId);
             chatInner.innerHTML = '';
             document.getElementById('main-title').textContent = '加载中…';
@@ -747,8 +884,11 @@
                 }
             } catch (e) { console.error('加载历史失败', e); }
             loadConversations();
+            refreshWorkflow().catch(error => showToast(error.message, true));
         }
         function newConversation() {
+            if (streaming) { showToast('请先停止当前回复', true); return; }
+            showWorkflow({});
             currentSessionId = 'session_' + Date.now();
             localStorage.setItem('tax_agent_session_id', currentSessionId);
             chatInner.innerHTML = `<div class="welcome" id="welcome"><h2>你好，我是税务助手</h2><p>我可以帮你解答发票合规、增值税、企业所得税、个人所得税等问题</p><div class="suggestion-grid" id="suggestion-grid"></div></div>`;
@@ -875,13 +1015,22 @@
                 document.getElementById('cfg-emb-url').value = cfg.embedding.base_url;
             } catch (e) { showToast(e.message, true); }
         }
-        function showSettings() { document.getElementById('cfg-auth-token').value = sessionStorage.getItem('tax_agent_auth_token') || ''; loadSettings(); document.getElementById('settings-modal').classList.add('show'); }
-        function closeSettings() { document.getElementById('cfg-llm-key').value = ''; document.getElementById('cfg-emb-key').value = ''; document.getElementById('settings-modal').classList.remove('show'); }
+        function showSettings() {
+            document.getElementById('cfg-user-token').value = getTokenForRole('user') !== DEFAULT_USER_TOKEN ? getTokenForRole('user') : '';
+            document.getElementById('cfg-user-token').placeholder = getTokenForRole('user') || DEFAULT_USER_TOKEN;
+            document.getElementById('cfg-admin-token').value = getTokenForRole('admin') !== DEFAULT_ADMIN_TOKEN ? getTokenForRole('admin') : '';
+            document.getElementById('cfg-admin-token').placeholder = getTokenForRole('admin') || DEFAULT_ADMIN_TOKEN;
+            document.getElementById('cfg-current-role').textContent = currentRole === 'admin' ? '🛡️ 管理员' : '👤 普通用户';
+            loadSettings();
+            document.getElementById('settings-modal').classList.add('show');
+        }
+        function closeSettings() { document.getElementById('cfg-llm-key').value = ''; document.getElementById('cfg-emb-key').value = ''; document.getElementById('cfg-user-token').value = ''; document.getElementById('cfg-admin-token').value = ''; document.getElementById('settings-modal').classList.remove('show'); }
         async function saveSettings() {
-            const token = document.getElementById('cfg-auth-token').value.trim().replace(/^Bearer\s+/i, '');
-            AUTH_TOKEN = 'Bearer ' + (token || 'test_token_123');
-            if (token) sessionStorage.setItem('tax_agent_auth_token', token);
-            else sessionStorage.removeItem('tax_agent_auth_token');
+            const userToken = document.getElementById('cfg-user-token').value.trim();
+            const adminToken = document.getElementById('cfg-admin-token').value.trim();
+            if (userToken) sessionStorage.setItem('tax_agent_user_token', userToken);
+            if (adminToken) sessionStorage.setItem('tax_agent_admin_token', adminToken);
+            AUTH_TOKEN = getAuthToken();
             const body = {
                 llm: { model: document.getElementById('cfg-llm-model').value, api_key: document.getElementById('cfg-llm-key').value, base_url: document.getElementById('cfg-llm-url').value },
                 embedding: { model: document.getElementById('cfg-emb-model').value, api_key: document.getElementById('cfg-emb-key').value, base_url: document.getElementById('cfg-emb-url').value },
@@ -895,17 +1044,66 @@
             } catch (e) { showToast(e.message, true); }
         }
 
-        // ---------- 用户信息 / 开发者入口 ----------
+        // ---------- 用户信息 / 角色切换 ----------
         async function loadMe() {
             try {
                 const resp = await fetch('/api/me', { headers: { 'Authorization': AUTH_TOKEN } });
                 const data = await resp.json();
-                document.getElementById('me-label').textContent = data.is_developer ? '开发者' : '';
-                document.getElementById('settings-btn').style.display = '';
+                const isAdmin = data.role === 'admin';
+                if (isAdmin !== (currentRole === 'admin')) {
+                    currentRole = isAdmin ? 'admin' : 'user';
+                    sessionStorage.setItem('tax_agent_role', currentRole);
+                    AUTH_TOKEN = getAuthToken();
+                }
+                updateRoleUI();
             } catch (e) {
-                document.getElementById('settings-btn').style.display = '';
+                updateRoleUI();
             }
         }
+        function updateRoleUI() {
+            const isAdmin = currentRole === 'admin';
+            const icon = document.getElementById('role-icon');
+            const label = document.getElementById('role-label');
+            const badge = document.getElementById('role-badge');
+            const meLabel = document.getElementById('me-label');
+            if (icon) icon.textContent = isAdmin ? '🛡️' : '👤';
+            if (label) label.textContent = isAdmin ? '管理员' : '普通用户';
+            if (badge) {
+                badge.classList.toggle('admin', isAdmin);
+                badge.title = isAdmin ? '管理员模式 — 点击切换' : '普通用户模式 — 点击切换';
+            }
+            if (meLabel) meLabel.textContent = isAdmin ? '🛡️ 管理员' : '👤 普通用户';
+            const dropdown = document.getElementById('role-dropdown');
+            if (dropdown) {
+                dropdown.querySelectorAll('.role-option').forEach(opt => {
+                    opt.classList.toggle('active', opt.dataset.role === currentRole);
+                });
+            }
+            const cfgCurrent = document.getElementById('cfg-current-role');
+            if (cfgCurrent) cfgCurrent.textContent = isAdmin ? '🛡️ 管理员' : '👤 普通用户';
+            document.getElementById('settings-btn').style.display = isAdmin ? '' : '';
+        }
+        function toggleRoleMenu(e) {
+            e.stopPropagation();
+            const dd = document.getElementById('role-dropdown');
+            dd.classList.toggle('show');
+        }
+        function switchRole(role) {
+            if (role === currentRole) {
+                document.getElementById('role-dropdown').classList.remove('show');
+                return;
+            }
+            currentRole = role;
+            sessionStorage.setItem('tax_agent_role', role);
+            AUTH_TOKEN = getAuthToken();
+            updateRoleUI();
+            document.getElementById('role-dropdown').classList.remove('show');
+            loadMe().then(() => { loadConversations(); loadModels(); });
+            showToast(role === 'admin' ? '已切换为管理员模式' : '已切换为普通用户模式');
+        }
+        document.addEventListener('click', () => {
+            document.getElementById('role-dropdown').classList.remove('show');
+        });
 
         // ---------- 初始化 ----------
         initTheme();
@@ -913,6 +1111,7 @@
         loadConversations();
         loadModels();
         loadMe();
+        refreshWorkflow().catch(error => showToast(error.message, true));
         toggleSidebar(window.innerWidth > 768);
     </script>
 </body>

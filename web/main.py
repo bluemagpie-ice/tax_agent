@@ -69,7 +69,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.params import Depends
 from starlette.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 from services.security import bind_tenant, reset_tenant
 from services.config_manager import ConfigManager
 
@@ -498,12 +498,18 @@ class CurrentUser(BaseModel):
     role:str = "user" # 默认用户
 
 
+class WorkflowResume(BaseModel):
+    id: str = Field(min_length=1, max_length=200)
+    value: StrictBool
+
+
 class TaxQueryRequest(BaseModel):
     user_id:str = Field(..., description="用户ID")
     query: str = Field(..., example="餐饮发票能开专票抵扣吗？",description="税务查询语句")
     session_id: Optional[str] = Field(None, description="会话ID")
     source_types: Optional[List[str]] = Field(None, description="知识来源筛选：default / user_upload / web_search；None 表示不限定")
     web_search: bool = Field(False, description="本轮主动联网检索；检索摘要直接注入，不依赖向量入库")
+    resume: WorkflowResume | None = None
 
 class ReferenceSource(BaseModel):
     """引用知识库来源"""
@@ -516,6 +522,7 @@ class TaxQueryResponse(BaseModel):
     answer: str = Field(..., description="智能体回答")
     references: List[ReferenceSource] = Field(..., description="引用知识库来源")
     status:str = "success"
+    pending: dict | None = None
 
 
 class PolicySourceRequest(BaseModel):
@@ -620,14 +627,16 @@ async def tax_chat(body: TaxQueryRequest, current_user: CurrentUser = Depends(ge
                 "uid": current_user.id,
                 "source_types": body.source_types,
                 "web_search": body.web_search,
+                "resume": body.resume.model_dump() if body.resume else None,
             },
         )
 
+        pending = await tax_agent.pending_workflow(session_id) if inspect.iscoroutinefunction(getattr(tax_agent, "pending_workflow", None)) else None
         return TaxQueryResponse(
             session_id=session_id,
             answer=answer or "（Agent 未返回有效内容）",
             references=[],
-            status="success",
+            status="waiting" if pending else "success", pending=pending,
         )
 
     except Exception as e:
@@ -683,6 +692,7 @@ async def tax_chat_stream(
             "user_name": current_user.user_name,
             "source_types": body.source_types,
             "web_search": body.web_search,
+            "resume": body.resume.model_dump() if body.resume else None,
         }
 
         # 与同步接口共用 TaxAgent 编排；长记忆注入和记录统一由 run 完成。
@@ -996,6 +1006,8 @@ def can_manage_file(record, user, include_system=False):
     metadata = record.get("tax_metadata", {})
     if include_system and user.role == "admin":
         return True
+    if user.role == "admin" and metadata.get("source_type") == "default":
+        return True
     return (metadata.get("owner_id") == user.id and metadata.get("scope") in ("global", "session")
             and metadata.get("source_type") != "default")
 
@@ -1143,6 +1155,44 @@ async def get_conversation_messages(session_id: str, current_user: CurrentUser =
         "title": title,
         "messages": messages,
     }
+
+
+@app.get("/api/conversations/{session_id}/workflow")
+async def get_conversation_workflow(session_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    if conversation_memory is None or conversation_memory.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail="对话不存在或不属于当前用户")
+    if tax_agent is None or not callable(getattr(tax_agent, "workflow_state", None)):
+        raise HTTPException(status_code=503, detail="工作流服务未就绪，请检查模型配置")
+    snapshot = await tax_agent.workflow_state(session_id)
+    values = snapshot.values if snapshot else {}
+    pending = await tax_agent.pending_workflow(session_id)
+    return {"pending": pending, "trace": values.get("workflow_trace", []),
+            "artifacts": [{"id": aid, "title": item["title"]} for aid, item in values.get("artifacts", {}).items()]}
+
+
+@app.post("/api/conversations/{session_id}/resume")
+async def resume_conversation(session_id: str, body: WorkflowResume, current_user: CurrentUser = Depends(get_current_user)):
+    await get_conversation_workflow(session_id, current_user)  # 先验证归属与服务状态。
+    try:
+        answer = await tax_agent.run("人工批准生成文件" if body.value else "人工拒绝生成文件",
+                                    {"thread_id": session_id, "uid": current_user.id, "resume": body.model_dump()})
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("[workflow] resume_failed=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="恢复失败，请保留待审批记录并重试") from exc
+    return {"answer": answer, **await get_conversation_workflow(session_id, current_user)}
+
+
+@app.get("/api/conversations/{session_id}/artifacts/{artifact_id}")
+async def download_workflow_artifact(session_id: str, artifact_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    await get_conversation_workflow(session_id, current_user)
+    snapshot = await tax_agent.workflow_state(session_id)
+    artifact = snapshot.values.get("artifacts", {}).get(artifact_id) if snapshot else None
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="文件未生成或已随对话删除")
+    return Response(content=json.dumps(artifact, ensure_ascii=False, indent=2), media_type="application/json",
+                    headers={"Content-Disposition": 'attachment; filename="filing-draft.json"'})
 
 
 class RenameConversationRequest(BaseModel):
