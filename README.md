@@ -8,7 +8,7 @@
 - **编排**：LangGraph（StateGraph + SQLite checkpointer 多轮持久化）
 - **LLM**：智谱 GLM（`langchain-openai` 兼容接口）
 - **向量库**：Qdrant（云端）+ BM25 词法 + Neo4j 图（可选），RRF 融合
-- **Embedding**：SiliconFlow（`BAAI/bge-large-zh-v1.5`，1024 维）
+- **Embedding**：BAAI/bge-m3（1024 维，通过 SiliconFlow 端点），默认硬编码
 - **存储**：SQLite（SQLAlchemy 业务表 + 原生键值存储层）
 - **文档解析/OCR**：Docling、PyPDF、PaddleOCR
 - **联网检索**：Bing（财政部/税务总局定向，无需搜索 API Key）
@@ -40,7 +40,7 @@ py -3.12 -m venv .venv
 # 2. 首次配置；已有 .env 时跳过复制，避免覆盖密钥
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 # LLM 可在首页 ⚙ 弹窗填模型 ID、API Key、Base URL。
-# RAG 还需在 .env 填 Qdrant 地址/密钥、VECTOR_SIZE，并配置 Embedding。
+# RAG 还需在 .env 填 Qdrant 地址/密钥、VECTOR_SIZE（Embedding 已默认 BAAI/bge-m3，无需手动配置）。
 
 # 3. 启动服务（--host / --port 可按需调整）
 .\.venv\Scripts\python.exe -m uvicorn web.main:app --host 127.0.0.1 --port 8000
@@ -67,7 +67,7 @@ tests/            测试（pytest）
 
 ## 配置与鉴权
 
-- 模型/Embedding 配置：首页侧栏 ⚙ 先选 GLM / DeepSeek / Kimi / Gemini / 自定义，自动填充地址；检测连接与获取列表均请求该地址的 `/models`，返回 ID 填入可自由输入的 datalist。自定义不限模型 ID。保存到 `data/config.json`，下次对话使用新客户端，右上角显示所选模型；只展示同一端点已获取的模型，不把 GLM 模型混入 Gemini 列表。页面重开后可重新获取列表。
+- 模型配置：首页侧栏 ⚙ 先选 GLM / DeepSeek / Kimi / Gemini / 自定义，自动填充地址；检测连接与获取列表均请求该地址的 `/models`，返回 ID 填入可自由输入的 datalist。自定义不限模型 ID。保存到 `data/config.json`，下次对话使用新客户端，右上角显示所选模型；只展示同一端点已获取的模型，不把 GLM 模型混入 Gemini 列表。页面重开后可重新获取列表。Embedding 已默认 BAAI/bge-m3，不在前端开放配置。
 - 同一模型端点 API Key 留空保留；切换端点需填写对应密钥，或使用匹配提供商的 `GEMINI_API_KEY` / `GOOGLE_API_KEY`、`DEEPSEEK_API_KEY`、`KIMI_API_KEY` / `MOONSHOT_API_KEY`、`GLM_API_KEY` / `ZHIPU_API_KEY` 环境变量。不会把旧提供商密钥发往新 URL，模型列表检测不会保存配置。Gemini 使用 [官方 OpenAI 兼容地址](https://ai.google.dev/gemini-api/docs/openai) `https://generativelanguage.googleapis.com/v1beta/openai/`；列表可访问不保证每个 ID 都能用于对话或向量化，仍需实际调用验收。
 - Qdrant 面板查询已保存地址的集合状态与精确点数（本项目每点一个向量），估算 float32 向量正文空间；可保存 Cloud 或自建 HTTP(S) 地址与密钥，新地址空密钥适用于无鉴权实例。地址切换不迁移文档或向量。可设置向量数量预警上限，达到 80% 显示橙色提示；0 表示不设数量上限。Cloud 地址在未设数量上限时，以[免费档 1 GiB RAM](https://qdrant.tech/cloud/)作参考，按[向量正文 × 1.5 的粗估](https://qdrant.tech/documentation/search-tuning/when-your-collection-outgrows-ram/)达到 80% 预警；自建地址不套用免费档参考。实际免费限制按资源，并无统一向量数上限；估算不含 payload、其他集合，不是实际用量、配额或账单，付费集群应自定数量上限。配置仍为服务级设置，适用于本地演示。
 - 鉴权：请求头 `Authorization: Bearer <token>`。
@@ -210,7 +210,7 @@ GLM-5.3 的最终答复使用 `reasoning_effort=low` 减少默认深度推理的
 - 页面能开但对话返回 503：打开 ⚙，补齐模型 ID、API Key、Base URL；服务商必须提供兼容 OpenAI 的接口。
 - 自定义 Token 后访问失败：在 ⚙ 弹窗填写与 `.env` 对应的访问 Token，再保存；API Key 是模型密钥，访问 Token 是本项目鉴权凭证。
 - 联网无结果：检查本机能否访问 Bing、代理设置和关键词；代码有 HTTP 状态校验、超时和无结果提示，可通过 `WEB_SEARCH_URL` 覆盖搜索地址。结果为空不代表模型已查证最新政策。
-- RAG 检索不可用：检查 Embedding 密钥、Qdrant 地址、网络和 `VECTOR_SIZE`。更换向量模型时必须保持原索引维度一致；已有文档需重新上传，避免混用不同模型的向量。
+- RAG 检索不可用：检查 Qdrant 地址、网络和 `VECTOR_SIZE`（Embedding 已默认 BAAI/bge-m3，可在 `.env` 中更换）。更换向量模型时必须保持原索引维度一致；已有文档需重新上传，避免混用不同模型的向量。
 - PDF 提示缺少 `pypdf`：按快速开始安装 `requirements.txt`；原开发环境未安装该运行依赖。
 - 图片/扫描 PDF OCR 为可选能力，按“上传与 OCR 环境”补齐 PaddlePaddle、PaddleOCR、官方模型及 Poppler。本机图片与扫描 PDF 已真实验收；缺少运行环境时会返回明确错误，CPU OCR 仍可能等待约一分钟或更久。
 - `pass`/TODO 有一部分是抽象接口、开发笔记和扩展入口；`/api/tax` 明确为预留接口，不用于本次演示闭环。
