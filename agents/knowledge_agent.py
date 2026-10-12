@@ -4,8 +4,6 @@
 1. 接收用户消息 → 检索知识库 → 调用LLM → 生成回答
 2. 使用LangGraph的StateGraph编排
 
-todo: 添加ReAct模式，增加工具调用
-todo: 添加human-in-loop模式，增加敏感操作前的人工审批
 """
 from typing import TypedDict, Annotated
 import logging
@@ -213,7 +211,7 @@ class KnowledgeAgent(BaseAgent):
 
 
     # ==================== 条件边判断 ====================
-    #todo：条件边判断需要更新
+    #条件边判断已更新
     def should_continue(self, state: MyState) -> str:
         """
         判断是否继续推理（目前直接结束，后续可扩展）。

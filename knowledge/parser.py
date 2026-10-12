@@ -128,7 +128,8 @@ class ImageParser(BaseParser):
                 from paddleocr import PaddleOCR
                 if "use_textline_orientation" in inspect.signature(PaddleOCR).parameters:
                     self._ocr_engine = PaddleOCR(lang="ch", use_textline_orientation=True,
-                                                 use_doc_orientation_classify=False, use_doc_unwarping=False)
+                                                 use_doc_orientation_classify=False, use_doc_unwarping=False,
+                                                 enable_mkldnn=False, cpu_threads=4)
                 else:
                     self._ocr_engine = PaddleOCR(
                         use_angle_cls=True,   # 启用方向分类
@@ -137,11 +138,10 @@ class ImageParser(BaseParser):
                     )
                 logging.info("PaddleOCR 引擎初始化成功")
             except ImportError as e:
-                logging.error(f"PaddleOCR 未安装，请运行: pip install paddleocr")
-                raise ImportError("请安装 paddleocr: pip install paddleocr") from e
+                raise RuntimeError("OCR 依赖错误：请安装 PaddleOCR 和 CPU版 PaddlePaddle") from e
             except Exception as e:
-                logging.error(f"PaddleOCR 初始化失败: {e}")
-                raise
+                logging.warning(f"PaddleOCR 初始化失败: {e}")
+                raise RuntimeError(f"OCR 初始化错误：{type(e).__name__}，请检查模型和PaddlePaddle环境") from e
         return self._ocr_engine
 
 
@@ -151,26 +151,30 @@ class ImageParser(BaseParser):
         """
         if not os.path.exists(self.image_path):
             logging.warning(f"图片文件不存在: {self.image_path}")
-            return ""
+            raise FileNotFoundError("图片文件不存在")
 
         if not os.access(self.image_path, os.R_OK):
             logging.warning(f"图片文件不可读: {self.image_path}")
-            return ""
+            raise PermissionError("图片文件不可读")
 
         try:
             ocr = self._get_ocr_engine()
+            if ocr is None:
+                raise RuntimeError("OCR 引擎不可用，请检查运行环境")
             if hasattr(ocr, "predict"):
                 text_lines = []
                 for page in ocr.predict(self.image_path):
                     text_lines.extend(text for text, score in zip(page.get("rec_texts", []), page.get("rec_scores", []))
                                       if score >= 0.5)
+                if not text_lines:
+                    raise ValueError("OCR 未识别到有效文字，请上传更清晰的图片")
                 return "\n".join(text_lines)
             result = ocr.ocr(self.image_path,cls=True)
             if result is None or len(result) == 0:
                 logging.info("未识别到文字")
-                return ""
+                raise ValueError("OCR 未识别到文字，请上传更清晰的图片")
             text_lines = []
-            for line in result:
+            for line in (result[0] if len(result) == 1 and result[0] else result):
                 # PaddleOCR 返回格式：
                 # line = [[[x1,y1], [x2,y2], [x3,y3], [x4,y4]], ('文字', confidence)]
                 if line and len(line) >= 2:
@@ -184,14 +188,14 @@ class ImageParser(BaseParser):
 
             if not text_lines:
                 logging.info("未识别到有效文字（置信度过低）")
-                return ""
+                raise ValueError("OCR 未识别到有效文字，请上传更清晰的图片")
 
             full_text = "\n".join(text_lines)
             logging.info(f"OCR 识别成功，共 {len(text_lines)} 行")
             return full_text
         except Exception as e:
             logging.error(f"OCR 识别错误: {e}")
-            return "OCR 错误：无法识别图片，请检查 PaddleOCR/PaddlePaddle 运行环境，或上传 TXT/Markdown 文本"
+            return f"OCR 错误：{type(e).__name__}；{e}"
 
 
     # def _parse_data_url(data_uri: str) -> str:
@@ -339,7 +343,7 @@ class PdfParser(BaseParser):
 
         # 扫描版 / 图片型 PDF：文本层为空或近乎为空时，回退到 OCR 识别
         if text and text.strip():
-            return text
+            return "\n\n".join(f"## 第 {i + 1} 页\n\n{d.page_content}" for i, d in enumerate(dos))
         logging.info("PDF 文本层为空，回退到 OCR 解析")
         return self.pdf_ocr_parse()
 
@@ -377,7 +381,8 @@ class PdfParser(BaseParser):
                 from paddleocr import PaddleOCR
                 if "use_textline_orientation" in inspect.signature(PaddleOCR).parameters:
                     self._ocr_engine = PaddleOCR(lang=lang, use_textline_orientation=True,
-                                                 use_doc_orientation_classify=False, use_doc_unwarping=False)
+                                                 use_doc_orientation_classify=False, use_doc_unwarping=False,
+                                                 enable_mkldnn=False, cpu_threads=4)
                 else:
                     self._ocr_engine = PaddleOCR(use_angle_cls=True, lang=lang, show_log=False)
                 logging.info("PaddleOCR 引擎初始化成功")
@@ -390,7 +395,7 @@ class PdfParser(BaseParser):
 
         # 2. 将 PDF 转换为图像
         try:
-            from pdf2image import convert_from_path
+            from pdf2image import convert_from_path, pdfinfo_from_path
         except ImportError as e:
             return (
                 "依赖错误：需要安装 pdf2image 库。\n"
@@ -399,38 +404,47 @@ class PdfParser(BaseParser):
             )
 
         try:
-            images = convert_from_path(self.file_path, dpi=300)
+            total_pages = int(pdfinfo_from_path(self.file_path, timeout=30)["Pages"])
         except Exception as e:
             logging.error(f"PDF 转图像失败: {e}")
-            return f"PDF 转图像失败：{e}"
+            raise RuntimeError("PDF 转图像失败，请检查文件及Poppler环境") from e
 
-        total_pages = len(images)
         max_page = total_pages if max_page == -1 else min(max_page, total_pages)
+        if total_pages < 1:
+            raise ValueError("PDF页码范围无效")
 
         if min_page < 1 or min_page > total_pages:
             min_page = 1
+        if max_page < min_page:
+            raise ValueError("PDF页码范围无效")
 
         # 3. 逐页 OCR 识别
         markdown_pages = []
+        recognized_pages = 0
         ocr = self._ocr_engine
 
         for page_idx in range(min_page - 1, max_page):
             page_num = page_idx + 1
             logging.info(f"正在识别第 {page_num}/{total_pages} 页...")
 
+            images = []
             try:
+                images = convert_from_path(self.file_path, dpi=300, first_page=page_num,
+                                           last_page=page_num, timeout=60)
                 # PaddleOCR 支持直接传入 PIL.Image
                 if hasattr(ocr, "predict"):
                     import numpy as np
-                    result = ocr.predict(np.asarray(images[page_idx]))
+                    result = ocr.predict(np.asarray(images[0]))
                 else:
-                    result = ocr.ocr(images[page_idx], cls=True)
+                    import numpy as np
+                    result = ocr.ocr(np.asarray(images[0]), cls=True)
 
                 if result is None or len(result) == 0:
                     page_text = ""
                 else:
                     text_lines = []
-                    for line in result:
+                    lines = result if hasattr(ocr, "predict") else result[0]
+                    for line in lines or []:
                         if isinstance(line, dict) or hasattr(line, "get"):
                             text_lines.extend(text for text, score in zip(line.get("rec_texts", []), line.get("rec_scores", []))
                                               if score >= confidence)
@@ -445,15 +459,21 @@ class PdfParser(BaseParser):
 
                 # 按页组织为 Markdown
                 if page_text.strip():
+                    recognized_pages += 1
                     markdown_pages.append(f"## 第 {page_num} 页\n\n{page_text}")
                 else:
                     markdown_pages.append(f"## 第 {page_num} 页\n\n*（未识别到文字）*")
 
             except Exception as e:
                 logging.error(f"第 {page_num} 页识别失败: {e}")
-                markdown_pages.append(f"## 第 {page_num} 页\n\n*识别失败：{e}*")
+                raise RuntimeError(f"第 {page_num} 页OCR识别失败，请检查图片清晰度与OCR环境") from e
+            finally:
+                for image in images:
+                    image.close()
 
         # 4. 汇总结果
+        if not recognized_pages:
+            raise ValueError("扫描PDF未识别到有效文字，文档未入库")
         header = f"# {self.file_name}（OCR 识别结果，共 {total_pages} 页）\n\n"
         full_markdown = header + "\n\n".join(markdown_pages)
 
@@ -471,8 +491,8 @@ class ParserFactory:
         '.pdf': PdfParser,
         '.docx': DocxParser,
         '.xlsx': DocxParser,
-        '.ppt': DocxParser,
-        '.pptx': DocxParser,
+        # '.ppt': DocxParser,    # 依赖 docling，暂无纯 Python 降级
+        # '.pptx': DocxParser,   # 依赖 docling，暂无纯 Python 降级
         '.csv': CsvParser,
         '.jpg': ImageParser,
         '.jpeg': ImageParser,

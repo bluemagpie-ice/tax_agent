@@ -190,15 +190,16 @@ class QdrantService:
         """
         初始化 Qdrant 客户端
         """
-        self.api_key = os.getenv("QDRANT_API_KEY")
-        self.url = os.getenv("QDRANT_CLUSTER_URL")
+        cfg = ConfigManager().get_qdrant_config()
+        self.api_key = cfg["api_key"]
+        self.url = cfg["url"]
 
-        if not self.api_key or not self.url:
-            raise ValueError("缺少 QDRANT_CLUSTER_URL 或 QDRANT_API_KEY 环境变量")
+        if not self.url:
+            raise ValueError("缺少 Qdrant URL，请在模型配置中填写")
 
         self.client = QdrantClient(
             url=self.url,
-            api_key=self.api_key,
+            api_key=self.api_key or None,
             timeout=30.0,
         )
 
@@ -227,12 +228,12 @@ class QdrantService:
 
         # 为常用过滤字段创建 payload 索引（Qdrant Cloud 按字段过滤必须建索引，幂等操作）
         indexed = self.client.get_collection(self.COLLECTION_NAME).payload_schema or {}
-        for field_name in ("file_id", "source_type", "owner_id", "scope", "session_id", "status"):
+        for field_name in ("file_id", "source_type", "owner_id", "scope", "session_id", "status", "tax_type", "is_current"):
             if field_name not in indexed:
                 self.client.create_payload_index(
                     collection_name=self.COLLECTION_NAME,
                     field_name=field_name,
-                    field_schema=PayloadSchemaType.KEYWORD,
+                    field_schema=PayloadSchemaType.BOOL if field_name == "is_current" else PayloadSchemaType.KEYWORD,
                     wait=True,
                 )
 

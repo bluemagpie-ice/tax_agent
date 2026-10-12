@@ -20,7 +20,7 @@
 3. **精确税务计算**：增值税/企业所得税/个人所得税/附加税费/印花税由纯函数硬编码公式计算（非 LLM 脑补），LLM 只做参数提取与解释。
 4. **跨会话记忆**：工作记忆 + 会话摘要压缩 + 用户画像（跨会话聚合），按租户物理隔离，乐观锁防并发覆盖。
 5. **自主联网检索**：勾选联网后，模型按需求选择搜索或读取网页正文；普通问候可不调用工具，来源以实际检索结果为准。
-6. **政策自动更新**：本地目录 / 国家税务总局法规库爬取 → 去重 → 增量入库，后台定时扫描。
+6. **政策自动更新**：本地目录 / 国家税务总局法规库 / 财政部爬取 → 去重 → 增量入库；政策页面支持手动扫描、管理源、调整间隔与查看报告。
 7. **离线评估框架**：内置 23 条评测集，量化意图准确率 / 关键词召回率 / 拒答正确率。
 8. **增量索引**：上传新文档只向量化新增块，不重算全库。
 9. **人工审批**：导出申报辅助 JSON 草稿前，图暂停并展示预览；批准后才生成可下载内容，拒绝直接终止。文件随会话检查点保存，删除对话时一起清理；目前不支持官方可提交申报表或发送邮件。
@@ -67,7 +67,9 @@ tests/            测试（pytest）
 
 ## 配置与鉴权
 
-- 模型/Embedding 配置：首页侧栏 ⚙ 弹窗支持填写任意兼容 OpenAI 接口的模型 ID、API Key、Base URL；写入 `data/config.json`，回退 `.env`。保存后更新已有模型客户端，下次对话生效；API Key 留空保留旧值。配置为服务级设置，适用于本地演示。
+- 模型/Embedding 配置：首页侧栏 ⚙ 先选 GLM / DeepSeek / Kimi / Gemini / 自定义，自动填充地址；检测连接与获取列表均请求该地址的 `/models`，返回 ID 填入可自由输入的 datalist。自定义不限模型 ID。保存到 `data/config.json`，下次对话使用新客户端，右上角显示所选模型；只展示同一端点已获取的模型，不把 GLM 模型混入 Gemini 列表。页面重开后可重新获取列表。
+- 同一模型端点 API Key 留空保留；切换端点需填写对应密钥，或使用匹配提供商的 `GEMINI_API_KEY` / `GOOGLE_API_KEY`、`DEEPSEEK_API_KEY`、`KIMI_API_KEY` / `MOONSHOT_API_KEY`、`GLM_API_KEY` / `ZHIPU_API_KEY` 环境变量。不会把旧提供商密钥发往新 URL，模型列表检测不会保存配置。Gemini 使用 [官方 OpenAI 兼容地址](https://ai.google.dev/gemini-api/docs/openai) `https://generativelanguage.googleapis.com/v1beta/openai/`；列表可访问不保证每个 ID 都能用于对话或向量化，仍需实际调用验收。
+- Qdrant 面板查询已保存地址的集合状态与精确点数（本项目每点一个向量），估算 float32 向量正文空间；可保存 Cloud 或自建 HTTP(S) 地址与密钥，新地址空密钥适用于无鉴权实例。地址切换不迁移文档或向量。可设置向量数量预警上限，达到 80% 显示橙色提示；0 表示不设数量上限。Cloud 地址在未设数量上限时，以[免费档 1 GiB RAM](https://qdrant.tech/cloud/)作参考，按[向量正文 × 1.5 的粗估](https://qdrant.tech/documentation/search-tuning/when-your-collection-outgrows-ram/)达到 80% 预警；自建地址不套用免费档参考。实际免费限制按资源，并无统一向量数上限；估算不含 payload、其他集合，不是实际用量、配额或账单，付费集群应自定数量上限。配置仍为服务级设置，适用于本地演示。
 - 鉴权：请求头 `Authorization: Bearer <token>`。
   - `AUTH_USER_TOKEN`：普通用户（默认 `test_token_123`）
   - `DEVELOPER_TOKEN`：开发者，可使用政策面板（回退 `AUTH_ADMIN_TOKEN` / `admin_token_456`）；普通演示用户也可打开模型配置弹窗。
@@ -84,6 +86,10 @@ tests/            测试（pytest）
 
 首页通过 SSE 显示处理状态、等待期间发送保活事件；主图完成审校后发送最终正文，避免错误草稿先展示。参数提取、多 Agent 中间结果不作为正文输出，原流式 API 保留。日志记录首字与总耗时；会话标题直接截取原始问题，避免额外等待一次模型调用。审批和追问会显示独立面板，重新打开历史会话可恢复待处理状态。
 
+回复期间可切换侧栏对话或新建对话：每个会话独立保存请求、流式消息、草稿、上传文件与审批状态；可同时向另一对话发问。侧栏绿色旋转圆点表示正在回复，发送/停止按钮只控制当前对话。完成后保留完整答案，服务端仍按原流程持久化。关闭浏览器或离开首页会断开尚未完成的请求；切换会话不离开页面。切换身份或删除正在回复的对话前，需要先停止相关回复。
+
+前端并发状态回归使用 Node 内置模块，不安装额外包：`node tests/test_conversation_ui.js`；覆盖双会话并发、后台消息隔离、切回完整结果、动画消失及只停止当前会话。
+
 ## 工作流演示与验收
 
 无需新增依赖；模型需支持 OpenAI 兼容的 tool calling。使用同一个会话完成以下交互，后台 `[workflow]` 日志及受鉴权的 `GET /api/conversations/{session_id}/workflow` 可查看实际节点、工具和分支证据（不输出工具参数或正文到日志）。
@@ -99,7 +105,7 @@ tests/            测试（pytest）
 
 2026-10-09 真实 GLM-5.3 验收：问候工具 0 次；官网查询实际执行两次搜索、两次网页读取，完成审校；审批批准生成 1 个草稿、拒绝生成 0 个，已批准草稿重启仍可下载；追问补充后得到 5,000 元（单次27.16秒）；两步计划实际执行增值税与附加税工具（单次41.22秒）；人工注入6000元错误草稿，真实审校模型修正为5000元。最终版普通计算返回5000元且审校保持原文（单次13.75秒），知识库检索、原申报专业路径及网页表格显示也完成实测。这些是功能演示，不代表准确率或稳定延迟。
 
-最终代码运行 `python -m pytest -q`：302项通过、1项原有跳过，耗时106.34秒；未新增跳过或删除原测试。上述真实模型演示独立于替身测试。
+2026-10-09 运行 `python -m pytest -q`：302项通过、1项原有跳过，耗时106.34秒；2026-10-10 上传修复后运行 `python -m pytest tests/ -q`：318项通过、1项原有跳过，最终复验耗时125.61秒。未新增跳过或删除原测试。上述真实模型演示独立于替身测试。
 
 `tests/test_agent_workflows.py` 使用真实图与临时 SQLite、可控模型覆盖上限退出、审批拒绝/重启/过期/跨用户、追问连续性、错误拦截、正常保留、失败重规划。真实模型故障和政策事实没有完整覆盖，不能把这些替身测试当成真实端到端通过。实现参考 [LangGraph Agent与工作流](https://docs.langchain.com/oss/python/langgraph/workflows-agents) 和 [interrupt与恢复](https://docs.langchain.com/oss/python/langgraph/interrupts)，复用已有图、工具和存储。
 
@@ -111,6 +117,75 @@ tests/            测试（pytest）
 - 删除按 `file_id` 清理 Qdrant 向量和文本 payload，等待完成并检查剩余数量，再清理本地分块、原文、SQL 记录、检索缓存与相关会话上下文。失败保留 `delete_failed` 记录，可重试；上传失败保留隔离记录，也可删除后重新上传。
 - 管理员删除预置资料时保留仓库原始素材，但记录停用，重启不会自动重新入库。历史聊天仍可浏览，删除资料相关的旧上下文不再参与后续回答。
 - 演示鉴权仍是两个 Token；实际多人部署需接入真实账号。浏览器每个标签页使用当前访问 Token，不提供匿名文档查询。
+
+### 上传与 OCR 环境
+
+单文件上限 **20 MiB**；空文件返回 400，超过上限返回 413，均不写入管理目录或创建文档记录。上传成功保留原 `file_name` 字段，并返回 `file_id`、`filename`、`size`（字节）、`mime_type`、`url`；`url` 是需携带访问 Token 的解析正文预览接口，不是公开的原件下载链接。
+
+图片与扫描 PDF 需要补齐可选 OCR 环境。以下组合已在 Windows / Python 3.12 / CPU 上实测：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install paddlepaddle==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+.\.venv\Scripts\python.exe -m pip install paddleocr==3.7.0 pdf2image==1.17.0
+# 扫描 PDF 另需安装系统 Poppler，并把其 bin 目录加入 PATH。
+# 重开终端后，以下两个命令都应可运行：
+pdfinfo -v
+pdftoppm -v
+```
+
+参考 [PaddlePaddle Windows 官方安装说明](https://www.paddlepaddle.org.cn/documentation/docs/install/pip/windows-pip_en.html) 和 [PaddleOCR 安装说明](https://paddlepaddle.github.io/PaddleOCR/main/version3.x/installation.html)。首次 OCR 会联网下载官方模型，需等待下载完成；本机已下载方向识别、检测、识别模型。关闭当前 CPU 组合不兼容的 MKL-DNN 推理选项，保留 OCR 功能。OCR 无正文、初始化失败或扫描页处理失败会明确报错并隔离文档，不会把“识别失败”当正文向量化。
+
+2026-10-10 对 `tests/fixtures` 的 **8 个原文件**逐个实测上传、鉴权预览、原件 SHA256、SQLite 分块记录、Qdrant Managed Cloud 向量数量及真实模型附件问答：
+
+| 文件 | 实际类型 | 分块 | 解析与问答核对 |
+| --- | --- | ---: | --- |
+| test_jpeg.jpeg | JPEG 图片 | 1 | OCR 提取 691 字；价税合计 241.95 元 |
+| test_pdf_2.pdf | 1 页扫描 PDF | 1 | OCR 保留页码；价税合计 309 元 |
+| test_pdf_medium.pdf | 1 页文本 PDF | 1 | 页码齐全；回答引用发票抬头与税号要求 |
+| test_pdf_long.pdf | 32 页文本 PDF | 11 | 32 个页码齐全；回答引用免抵退与先征后退 |
+| test_docx_long.docx | DOCX | 3 | 回答引用原文“道道征税、环环抵扣” |
+| test_txt.txt | TXT | 1 | 回答引用附件列出的 13%、9%、6% |
+| test_csv.csv | CSV | 1 | MIME 为 text/csv；2024-02 税额 156000 元 |
+| test_xlsx.xlsx | XLSX，4 个工作表 | 11 | SSE 问答引用年度增值税 945000 元 |
+
+这些金额和税率只核对测试资料内容，不视为现行法规。重启后 8 份文档仍可预览，上传元数据与 SQLite 分块记录保持一致。实测 CPU JPEG 上传约 59–75 秒、扫描 PDF 约 124 秒，附件问答复用已入库正文，不重复 OCR；这些单次耗时不代表稳定延迟或 OCR 准确率。修复前产生的两个失败验收副本已隔离，保留文件供诊断。
+
+原知识库问答复验发现 Cloud 缺少税种过滤索引，现复用原初始化补齐 `tax_type` 的 keyword 索引和 `is_current` 的 bool 索引，实际组合过滤已返回成功。一次模型审校返回格式不符时按原规则拒绝发布；提示现使用合法 JSON 示例与字段约束，严格校验仍保留，外部模型格式或网络故障仍可能要求重试。最终重启复验：8 份附件问答再次通过，原问候、5000 元计算、调用知识库工具的问答均通过。
+
+目录中没有超大文件、MD、PNG、WEBP 样本；另外构造 20 MiB + 1 字节请求验证 413，未修改原测试文件。混合文本/扫描页 PDF、损坏或加密 PDF 不在本次真实文档验收范围。`tests/test_upload_fixtures.py` 保留原文件解析检查，并用隔离 SQL/Qdrant 验证响应字段、有限大小、OCR 失败隔离、分页失败及附件在同步/SSE 问答中的传递；故障注入不等于真实 OCR 测试。
+
+## 政策更新与文本 diff 验收
+
+首页侧栏 📜 或知识库导航“政策更新”进入 `/policy`，复用训练页已有面板。预置国家税务总局法规库和财政部税政司，默认保留本地目录源；可添加网站列表页或单篇正文 URL、删除源、查看历史报告与 diff。源清单和更新间隔保存到 `data/config.json`，重启保持，已删除源不会重新添加。
+
+自动更新默认 6 小时，可选 12 小时、每天、每周；首次自动扫描在间隔到期后执行，启动时不立即抓取官网，可点“立即更新”。间隔修改从当前时刻重新计时，不中断已有扫描。官网源默认每次扫描首页最多 5 篇，适用于有限演示；不是完整历史法规同步。状态显示扫描源或入库进度，完成后右下角 Toast 和报告表展示新增、变更、失败数；源选择器不适配时报告明确错误，不把空抓取当成功。
+
+```powershell
+# 无需启动 FastAPI；使用已有 Embedding / Qdrant 配置，真实入库到独立验收集合。
+.\.venv\Scripts\python.exe verify_policy_update.py --task all
+# 仅验证官网列表页、链接选择器和一篇正文，不入库。
+.\.venv\Scripts\python.exe verify_policy_update.py --task connectivity
+```
+
+脚本直接创建 `PolicyUpdater` 并调用 `run_once()`，打印完整报告；支持 `flow`、`change`、`window` 分项复验。`data/policies/` 为空时创建两条明确标注的模拟 Markdown；同名变更与时间窗口样本保存在独立验收目录，不改现有政策。模拟文件带 `policy-update-demo` 标记，仅归验收用户，不能作为普通用户的政策依据。每次使用独立 Cloud 集合及本地数据库、分块存储，完整证据写入 `data/policy_verification/<验收编号>/evidence.json`，不自动删除。`--work-dir` 必须使用新目录。
+
+本地扫描读取实际正文计算哈希；同内容二次扫描跳过，变更和失败重试可入库。`PolicyUpdater(since_date="2022-01-01")` 按正文发布日期标签或文件名日期过滤，边界日期包含在内；未知发布日期会明确记录并排除，文件修改时间不作为发布日期。官网使用 [国家税务总局法规库列表](https://fgk.chinatax.gov.cn/zcfgk/c100027/list.html)，旧示例地址已失效；选择器适配失败会明确指出 `link_selector` / `title_selector` / `content_selector`。
+
+SQLite 自动补齐快照及报告字段，保留旧行；每条政策保存当前及上一版完整正文，使用标准库 `difflib` 输出真实 diff。历史记录未保存的旧正文无法补回，会明确提示；旧版 Cloud 向量目前仍保留，尚未自动停用。训练页政策面板已去重，支持 Windows 路径的 diff 查看。Qdrant 不可用时返回失败报告并保留重试记录；手动与后台更新串行执行，SQLite 连接加锁，shutdown 停止调度器后关闭连接；运行中的网络操作不能强制中断，5 秒未退出会明确报错并保留线程状态。
+
+“刷新变更列表”展示政策标题、政策发布日期、来源友好名称及原文链接、100 字以内的变更摘要，点击“查看变更详情”仍展开完整 unified diff。Markdown 取第一个一级标题，没有标题则用文件名；摘要取新旧快照 diff 的新增行，纯删除显示删除内容，无旧快照时明确提示无法生成摘要，不调用 LLM。旧接口的哈希、snapshot、updated_at 字段保留，新增 `published_date`、`source_name`、`url`、`summary`。
+
+迁移先用 `PRAGMA table_info` 检查，再按需 `ALTER TABLE ADD COLUMN` 补齐发布日期、URL 和来源名称，兼容重复启动；[SQLite ADD COLUMN](https://www.sqlite.org/lang_altertable.html#altertabaddcol) 没有 `IF NOT EXISTS` 语法。旧记录可从快照或文件名恢复日期；无法确认则显示“未知（未提供）”，不以检测时间冒充发布时间。本地文件无网页链接，不伪造 URL；旧记录仅存网站文章 ID 时无法凭空还原原文地址，下次同正文扫描会补齐可获取的元数据，仍去重且不改变旧哈希、快照和检测时间。
+
+2026-10-12 变更展示验收：政策相关 56 项通过；最终全量 354 项通过、1 项原有跳过、30 条警告，耗时 104.34 秒。隔离 SQLite 的模拟变更已在浏览器核对日期、来源链接、摘要与完整 diff 展开，重启前后 3 条 API 记录完全一致；未把模拟政策写入向量库。真实问候返回、计算返回 5000 元；知识库工具调用成功，本次未检到进项税定义，答复明确说明。证据在 `data/feature_verification/20261012/`；未修改 `.env`、原配置或引入依赖。
+
+2026-10-10 真实验收：首次扫描与 Cloud 入库 2 条、二次拦截 2 条，报告和日志钩子各 2 次；同名变更重新入库 1 条并记录旧哈希；2020/2024 时间窗口仅 2024 入库；官网列表 HTTP 200、16 个链接，正文标题、279 字文本、URL 均非空。新旧 diff 重开数据库后保持一致，浏览器实际按钮与 diff 展示已验收。故障与线程测试使用替身，不能等同于真实 Cloud 故障演练；本次未引入依赖或修改 `.env`。
+
+2026-10-11 设置、政策管理及并行对话验收：Gemini `/models` 返回 62 个 ID，错误密钥显示红色提示；`gemini-flash-latest` 保存后实际问候成功，本账号 `gemini-2.5-flash` 对话返回 404，不能仅凭模型列表判定可用。自定义模式手填 GLM 地址与模型，连接、保存、下拉及实际对话通过。原 Qdrant 集合实时查询 84 个点；80% 预警用故障注入/模拟数量验证，不向真实库灌大量向量。
+
+同日最终运行 `python -m pytest tests/ -q`：346 项通过、1 项原有跳过、30 条警告，耗时 106.78 秒；`node tests/test_conversation_ui.js` 验证六项并发行为通过，三页内联 JavaScript 语法检查通过。未新增跳过或删除测试；DeepSeek / Kimi 未进行真实密钥调用，Qdrant 自建切换以临时配置和替身验证。
+
+政策测试使用隔离配置、SQL 和 Cloud 集合 `tax_ui_review_20261011`：第一轮扫描 15 条、新增及入库 10 条、重复 5 条、失败 0；第二轮重复 10 条、财政部列表超时 1 次，历史报告与 Toast 明确显示失败。自定义源添加、删除及每 12 小时配置在重启后保持；调度线程新间隔实际执行用短间隔测试，未等待真实 12 小时。浏览器 A 长回复期间可切换 B 查看历史并发送，同时显示两个加载点；完成后 A 的 2669 字回复保留，停止按钮按当前对话切换。原问候、5000 元税额计算通过；原知识库问答第一次审校格式失败，重试检索成功且 reflection 通过。证据保存在 `data/feature_verification/20261011/`，未修改 `.env` 或原服务配置。
 
 ## 简单数据与选型取舍
 
@@ -137,12 +212,12 @@ GLM-5.3 的最终答复使用 `reasoning_effort=low` 减少默认深度推理的
 - 联网无结果：检查本机能否访问 Bing、代理设置和关键词；代码有 HTTP 状态校验、超时和无结果提示，可通过 `WEB_SEARCH_URL` 覆盖搜索地址。结果为空不代表模型已查证最新政策。
 - RAG 检索不可用：检查 Embedding 密钥、Qdrant 地址、网络和 `VECTOR_SIZE`。更换向量模型时必须保持原索引维度一致；已有文档需重新上传，避免混用不同模型的向量。
 - PDF 提示缺少 `pypdf`：按快速开始安装 `requirements.txt`；原开发环境未安装该运行依赖。
-- 图片/扫描 PDF OCR 为可选能力，需要单独配置 PaddleOCR、PaddlePaddle、模型文件；扫描 PDF 还需 `pdf2image` 和系统 Poppler。本次未安装或验证真实 OCR 引擎，演示优先使用 Markdown、TXT 或文本版 PDF。
+- 图片/扫描 PDF OCR 为可选能力，按“上传与 OCR 环境”补齐 PaddlePaddle、PaddleOCR、官方模型及 Poppler。本机图片与扫描 PDF 已真实验收；缺少运行环境时会返回明确错误，CPU OCR 仍可能等待约一分钟或更久。
 - `pass`/TODO 有一部分是抽象接口、开发笔记和扩展入口；`/api/tax` 明确为预留接口，不用于本次演示闭环。
 
 ## 已知待办（README 版）
 
 - SQLite 旧文档表启动时只补齐 `business_id`、`file_name`、`chunk_count`，保留旧行；更广泛的 schema 迁移仍未实现。
 - 记忆无 PII 脱敏。
-- 政策变更的文本级 diff 尚未真正实现（需存旧快照）。
-- `web/templates/training.html` 政策面板代码被复制了三份，待去重。
+- 政策旧版向量尚未自动停用；历史缺失的旧正文快照无法追补。
+- 政策面板去重与文本 diff 已完成，独立验收步骤见上文。

@@ -254,8 +254,10 @@ class QdrantKnowledgeBase(KnowledgeBase):
         parser_module = await asyncio.to_thread(importlib.import_module, "knowledge.parser")
         parser = await asyncio.to_thread(parser_module.ParserFactory.get_parser, file_path)
         markdown_text = await asyncio.to_thread(parser.parse)
-        if not markdown_text or markdown_text.lstrip().startswith(("解析错误", "文件解析错误", "PDF 错误", "OCR 错误", "OCR 依赖错误", "OCR 初始化错误", "依赖错误", "错误：")):
-            return {"status": "error", "message": markdown_text or "解析失败"}
+        if markdown_text and markdown_text.lstrip().startswith(("解析错误", "文件解析错误", "PDF 错误", "OCR 错误", "OCR 依赖错误", "OCR 初始化错误", "依赖错误", "错误：")):
+            return {"status": "error", "message": markdown_text}
+        if not markdown_text or not markdown_text.strip():
+            return {"status": "error", "message": "未提取到有效正文，文档未入库；请检查文件内容或OCR环境"}
 
         preset_id = kwargs.get("chunk_preset_id", "general")
         chunk_size = kwargs.get("chunk_size", 1024)

@@ -40,10 +40,7 @@ config: 配置文件
 为什么需要这个：当用户提问“什么是进项税”时，Agent 可以直接调用定义，避免去几万字的文件里盲目检索。
 
 todo: templates部分的html文件格式需了解。
-todo：更新后的ingest_file和TaxAgent需要阅读理解
-todo:需要更新security.py中的租户信息。
-#todo：html中提取主题是通过概括的方式提取，如果不能成果再提取前20词（除了ai外有无更好的方法）。
-#todo：html中增加删除对话（同时删除对应的id和其他存储的内容）
+todo：更新后的ingest_file和TaxAgent需要理解
 """
 
 # ======日记配置=====
@@ -71,7 +68,7 @@ from starlette.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, StrictBool
 from services.security import bind_tenant, reset_tenant
-from services.config_manager import ConfigManager
+from services.config_manager import ConfigManager, MODEL_PROVIDERS, validate_api_url, infer_provider
 
 
 logger = logging.getLogger(__name__)
@@ -82,6 +79,7 @@ PATHS = {
     "uploads": str(BASE_DIR / "uploads"),
     "data": str(BASE_DIR / "data"),
 }
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 os.makedirs(PATHS["uploads"], exist_ok=True)
 os.makedirs(PATHS["data"], exist_ok=True)
 
@@ -127,8 +125,8 @@ async def lifespan(app: FastAPI):
         preset_files = sorted(presets_dir.glob("*.md"))
         emb_cfg = ConfigManager().get_embedding_config()
         rag_configured = (all(emb_cfg.values()) and not emb_cfg["api_key"].startswith("your_")
-                          and bool(os.getenv("QDRANT_CLUSTER_URL"))
-                          and "your-cluster" not in os.getenv("QDRANT_CLUSTER_URL", ""))
+                          and bool(ConfigManager().get_qdrant_config()["url"])
+                          and "your-cluster" not in ConfigManager().get_qdrant_config()["url"])
         if preset_files and rag_configured:
             logger.info(f"[lifespan] 检测到 {len(preset_files)} 个预置知识文件，开始入库...")
             for pf in preset_files:
@@ -164,18 +162,22 @@ async def lifespan(app: FastAPI):
         recursive=True,
         category="税务政策",
     ))
-    # 可选：对接国家税务总局法规库（配置 TAX_CN_LISTING_URL 环境变量激活）
+    # 预置官网源；保存的源清单优先（删除后不会在重启时重新出现）。
     chinatax_url = os.getenv("TAX_CN_LISTING_URL", "")
-    if chinatax_url:
-        policy_updater.add_source(TaxGovCnSource(
-            listing_url=chinatax_url,
-            source_id="chinatax",
-            category=os.getenv("TAX_CN_CATEGORY", "税务法规"),
-            max_pages=int(os.getenv("TAX_CN_MAX_PAGES", "3")),
-        ))
-        logger.info(f"[lifespan] 已注册国家税务总局法规源: {chinatax_url}")
+    policy_cfg = ConfigManager().get_policy_config()
+    defaults = [
+        {"source_type":"tax_gov_cn", "source_id":"chinatax", "category":"国家税务总局法规库",
+         "listing_url":chinatax_url or "https://fgk.chinatax.gov.cn/zcfgk/c100027/list.html", "max_pages":1, "max_items":5},
+        {"source_type":"tax_gov_cn", "source_id":"mof", "category":"财政部税政司",
+         "listing_url":"https://szs.mof.gov.cn/zhengcefabu/", "link_selector":"a[href*='/t20'], a[href^='./20']",
+         "title_selector":"meta[name='ArticleTitle'], h2.title_con", "content_selector":".TRS_Editor", "max_pages":1, "max_items":5},
+    ]
+    if "sources" in policy_cfg:
+        policy_updater.remove_source("local_policies")
+    for source in policy_cfg.get("sources", defaults):
+        policy_updater.add_source(policy_source_from_config(source))
     # 启动后台定时扫描（每 6 小时一次）
-    policy_updater.start_scheduler(interval_seconds=6 * 3600)
+    policy_updater.start_scheduler(interval_seconds=policy_cfg.get("interval_hours", 6) * 3600, run_immediately=False)
     app.state.policy_updater = policy_updater
 
     # 让模块级全局变量也能被旧代码引用（兼容向后）
@@ -193,9 +195,11 @@ async def lifespan(app: FastAPI):
     # ---- shutdown ----
     logger.info("[lifespan] 正在清理资源...")
     # 停止政策更新调度器
+    import asyncio
     if hasattr(app.state, "policy_updater") and app.state.policy_updater:
         try:
-            app.state.policy_updater.stop_scheduler()
+            await asyncio.to_thread(app.state.policy_updater.stop_scheduler)
+            app.state.policy_updater.tracker.close()
         except Exception as e:
             logger.warning("[lifespan] 停止调度器失败（%s）", type(e).__name__)
     # 取消所有残余 async 任务，避免 "event loop is closed"
@@ -300,6 +304,14 @@ class KnowledgeService:
             if result.get("status") == "success":
                 result["message"] = f"文件 {file.filename} 已完成向量化，共 {result.get('chunk_count', 0)} 个分块"
                 result["file_name"] = file.filename
+                import mimetypes
+                result.update(filename=Path((file.filename or "").replace("\\", "/")).name,
+                              size=file_path.stat().st_size,
+                              mime_type="text/csv" if file_path.suffix.lower() == ".csv" else mimetypes.guess_type(file.filename or "")[0] or file.content_type or "application/octet-stream",
+                              url=f"/api/knowledge/files/{file_id}/content")
+                record = next(f for f in self._kb._metadata["files"] if f["file_id"] == file_id)
+                record.update({key: result[key] for key in ("filename", "size", "mime_type", "url")})
+                self._kb.save_metadata()
 
                 # 4. 同步写入 SQL 业务表（KnowledgeFiles + KnowledgeChunks）
                 try:
@@ -482,7 +494,9 @@ class KnowledgeService:
             raise ValueError("请上传支持的文本、PDF、Office 或图片文件")
         safe_name = f"{ts}_{uuid.uuid4().hex}_{name}"
         file_path = Path(self.upload_dir) / safe_name
-        content = file.file.read()
+        content = file.file.read(MAX_UPLOAD_BYTES + 1)
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="文件超过20 MiB上限，请拆分后上传")
         if not content:
             raise ValueError("不能上传空文件")
         with open(file_path, "wb") as f:
@@ -509,6 +523,7 @@ class TaxQueryRequest(BaseModel):
     session_id: Optional[str] = Field(None, description="会话ID")
     source_types: Optional[List[str]] = Field(None, description="知识来源筛选：default / user_upload / web_search；None 表示不限定")
     web_search: bool = Field(False, description="本轮主动联网检索；检索摘要直接注入，不依赖向量入库")
+    uploaded_file_ids: Optional[List[str]] = Field(None, max_length=10, description="本轮对话中用户上传的文件ID列表")
     resume: WorkflowResume | None = None
 
 class ReferenceSource(BaseModel):
@@ -599,6 +614,7 @@ def knowledge(request: Request):
     return render_page(request, "knowledge.html")
 
 @app.get("/training", response_class=HTMLResponse)
+@app.get("/policy", response_class=HTMLResponse)
 def training(request: Request):
     """训练测试页面"""
     return render_page(request, "training.html")
@@ -627,6 +643,7 @@ async def tax_chat(body: TaxQueryRequest, current_user: CurrentUser = Depends(ge
                 "uid": current_user.id,
                 "source_types": body.source_types,
                 "web_search": body.web_search,
+                "uploaded_file_ids": body.uploaded_file_ids,
                 "resume": body.resume.model_dump() if body.resume else None,
             },
         )
@@ -692,6 +709,7 @@ async def tax_chat_stream(
             "user_name": current_user.user_name,
             "source_types": body.source_types,
             "web_search": body.web_search,
+            "uploaded_file_ids": body.uploaded_file_ids,
             "resume": body.resume.model_dump() if body.resume else None,
         }
 
@@ -754,7 +772,9 @@ async def tax_chat_stream(
                 raise
             except Exception as e:
                 logger.warning("[流式] 查询失败（%s）", type(e).__name__)
-                yield f"event: error\ndata: {json.dumps({'msg': '查询失败，请检查模型配置或网络连接后重试'}, ensure_ascii=False)}\n\n"
+                message = ("模型不存在或当前 API Key 无权使用；请在设置中重新获取列表，并选择可用的对话模型"
+                           if getattr(e, "status_code", None) == 404 else "查询失败，请检查模型配置或网络连接后重试")
+                yield f"event: error\ndata: {json.dumps({'msg': message}, ensure_ascii=False)}\n\n"
             finally:
                 stream_open = False
                 if task is not None and not task.done():
@@ -1015,6 +1035,9 @@ def can_manage_file(record, user, include_system=False):
 def public_file_info(record):
     metadata = record.get("tax_metadata", {})
     return {"file_id": record["file_id"], "file_name": record.get("file_name", record["file_id"]),
+            "filename": record.get("filename", record.get("file_name", record["file_id"])),
+            "size": record.get("size"), "mime_type": record.get("mime_type"),
+            "url": record.get("url", f"/api/knowledge/files/{record['file_id']}/content"),
             "chunk_count": record.get("chunk_count", 0), "status": record.get("status", "active"),
             "scope": metadata.get("scope") or ("system" if metadata.get("source_type") == "default" else "legacy"),
             "session_id": metadata.get("session_id", ""), "cloud_only": record.get("cloud_only", False)}
@@ -1271,6 +1294,38 @@ async def retract_last_turn(session_id: str, current_user: CurrentUser = Depends
 # 政策自动更新 API
 # ================================================================
 
+def policy_source_from_config(data):
+    from knowledge.policy_updater import LocalDirectorySource, HttpCrawlSource, TaxGovCnSource
+    kind = data.get("source_type") or data.get("type")
+    if kind in ("local", "local_directory"):
+        return LocalDirectorySource(directory=data["directory"], source_id=data["source_id"],
+                                    recursive=data.get("recursive", True), category=data.get("category", ""))
+    if kind == "http":
+        for url in data["urls"]:
+            validate_api_url(url)
+        return HttpCrawlSource(source_id=data["source_id"], urls=data["urls"], category=data.get("category", ""))
+    url = data.get("listing_url") or (data.get("urls") or [""])[0]
+    validate_api_url(url)
+    options = {key:data[key] for key in ("max_pages", "max_items", "link_selector", "title_selector", "content_selector", "date_selector") if key in data}
+    if kind == "website":
+        options.update(link_selector="a[href*='content.html'], a[href*='/t20'], a[href^='./20'], main a[href$='.html'], .list a[href$='.html']",
+                       title_selector="meta[name='ArticleTitle'], h1, h2.title_con, .title",
+                       content_selector=".TRS_Editor, #zoom, #fontzoom, article, .article, .xxgk_content", max_pages=1, max_items=5)
+    return TaxGovCnSource(listing_url=url, source_id=data["source_id"], category=data.get("category", ""), **options)
+
+
+class PolicyScheduleRequest(BaseModel):
+    interval_hours: int = Field(default=6, ge=1, le=168)
+
+
+@app.put("/api/policy/schedule")
+def set_policy_schedule(body: PolicyScheduleRequest, current_user: CurrentUser = Depends(get_current_user)):
+    if not policy_updater:
+        raise HTTPException(status_code=503, detail="政策更新器未初始化")
+    ConfigManager().save_policy_config({"interval_hours":body.interval_hours})
+    policy_updater.set_interval(body.interval_hours * 3600)
+    return {"success":True, "scheduler":policy_updater.get_scheduler_status()}
+
 @app.post("/api/policy/update")
 def trigger_policy_update(current_user: CurrentUser = Depends(get_current_user)):
     """手动触发一次政策更新扫描（扫描→去重→增量入库）"""
@@ -1330,17 +1385,28 @@ def add_policy_source(body: PolicySourceRequest, current_user: CurrentUser = Dep
                 recursive=body.recursive,
                 category=body.category,
             )
-        elif body.type == "http":
+        elif body.type in ("http", "website"):
             if not body.urls:
                 raise HTTPException(status_code=400, detail="type=http 时必须提供 urls")
-            src = HttpCrawlSource(
-                source_id=body.source_id or f"http_{int(time.time())}",
-                urls=body.urls,
-                category=body.category,
-            )
+            src = policy_source_from_config({**body.model_dump(), "source_id":body.source_id or "site_" + uuid.uuid4().hex[:12]})
         else:
-            raise HTTPException(status_code=400, detail=f"不支持的政策源类型: {body.type}，仅支持 local / http")
+            raise HTTPException(status_code=400, detail=f"不支持的政策源类型: {body.type}，仅支持 local / http / website")
 
+        if any(s["source_id"] == src.source_id for s in policy_updater.get_sources_info()):
+            raise HTTPException(status_code=409, detail="来源 ID 已存在")
+        # 先保存完整清单再应用，写盘失败时不会出现虚假的成功。
+        info = policy_updater.get_sources_info()
+        from knowledge.policy_updater import PolicyUpdater
+        descriptor = {"source_type": src.source_type, "source_id": src.source_id, "category":src.category}
+        if isinstance(src, LocalDirectorySource):
+            descriptor.update(directory=src.directory, recursive=src.recursive)
+        elif isinstance(src, HttpCrawlSource):
+            descriptor.update(urls=list(src.urls))
+        else:
+            descriptor.update(listing_url=src.listing_url, link_selector=src.link_selector,
+                              title_selector=src.title_selector, content_selector=src.content_selector,
+                              max_pages=src.max_pages, max_items=src.max_items)
+        ConfigManager().save_policy_config({"sources":info + [descriptor]})
         policy_updater.add_source(src)
         logger.info(f"[政策更新] 已添加政策源: type={body.type}, id={src.source_id}")
         return {
@@ -1349,6 +1415,8 @@ def add_policy_source(body: PolicySourceRequest, current_user: CurrentUser = Dep
         }
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"[政策更新] 添加政策源失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"添加政策源失败: {e}")
@@ -1370,9 +1438,11 @@ def remove_policy_source(source_id: str, current_user: CurrentUser = Depends(get
     """按 source_id 移除一个政策源"""
     if not policy_updater:
         raise HTTPException(status_code=503, detail="政策更新器未初始化")
-    ok = policy_updater.remove_source(source_id)
-    if not ok:
+    sources = policy_updater.get_sources_info()
+    if not any(s["source_id"] == source_id for s in sources):
         raise HTTPException(status_code=404, detail=f"政策源不存在: {source_id}")
+    ConfigManager().save_policy_config({"sources":[s for s in sources if s["source_id"] != source_id]})
+    policy_updater.remove_source(source_id)
     return {"success": True, "removed": source_id}
 
 
@@ -1434,12 +1504,90 @@ def get_settings(current_user: CurrentUser = Depends(get_current_user)):
         "success": True,
         "config": ConfigManager().get_all_config(),
         "known_models": _KNOWN_MODELS,
+        "providers": MODEL_PROVIDERS,
     }
 
 
 class SettingsUpdateRequest(BaseModel):
     llm: dict | None = None
     embedding: dict | None = None
+    qdrant: dict | None = None
+
+
+class ModelConnectionRequest(BaseModel):
+    section: str = Field(pattern="^(llm|embedding)$")
+    base_url: str = Field(min_length=1, max_length=2048)
+    api_key: str = Field(default="", max_length=4096)
+
+
+@app.post("/api/settings/models")
+def probe_models(body: ModelConnectionRequest, current_user: CurrentUser = Depends(get_current_user)):
+    """服务端检测 OpenAI 兼容 /models；密钥不回传，也不写入配置。"""
+    import requests
+    try:
+        url = validate_api_url(body.base_url.strip())
+        key = ConfigManager().resolve_model_key(body.section, url, body.api_key)
+        if not key:
+            raise ValueError("请填写所选提供商的 API Key")
+        response = requests.get(url + "models", headers={"Authorization": "Bearer " + key},
+                                timeout=(5, 15), allow_redirects=False)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise ValueError("模型列表必须是 OpenAI 兼容的 data 数组")
+        models = sorted({row["id"] for row in payload["data"] if isinstance(row, dict)
+                         and isinstance(row.get("id"), str) and row["id"].strip()})
+        if infer_provider(url) == "Gemini":
+            models = [model.removeprefix("models/") for model in models]
+        if not models:
+            raise ValueError("模型列表为空")
+        return {"success": True, "models": models, "message": "✅ 连接成功"}
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        logger.warning("[模型检测] 失败（%s）", type(exc).__name__)
+        return {"success": False, "models": [], "message": "❌ 无法连接，请检查配置"}
+
+
+@app.get("/api/settings/qdrant")
+def qdrant_usage(current_user: CurrentUser = Depends(get_current_user)):
+    """只读监控实际点数；空间是向量 float32 裸数据估算，不是云端账单。"""
+    from qdrant_client import QdrantClient
+    from knowledge.embedding import QdrantService
+    cfg = ConfigManager().get_qdrant_config()
+    client = None
+    try:
+        validate_api_url(cfg["url"])
+        client = QdrantClient(url=cfg["url"], api_key=cfg["api_key"] or None, timeout=10,
+                              check_compatibility=False)
+        collection = QdrantService.COLLECTION_NAME
+        names = {c.name for c in client.get_collections().collections}
+        dimensions, total, state = 0, 0, "集合尚未创建"
+        if collection in names:
+            info = client.get_collection(collection)
+            vectors = info.config.params.vectors
+            dimensions = sum(v.size for v in vectors.values()) if isinstance(vectors, dict) else vectors.size
+            total = client.count(collection, exact=True).count
+            state = str(info.status)
+        limit = cfg["vector_limit"]
+        estimated_bytes = total * dimensions * 4
+        # Cloud 免费档资源参考，不是实际 RAM 用量；自建实例不套用此参考。
+        from urllib.parse import urlparse
+        cloud_reference = (urlparse(cfg["url"]).hostname or "").endswith(".qdrant.io")
+        reference_ram_bytes = 1024 ** 3 if cloud_reference else None
+        estimated_ram_bytes = int(estimated_bytes * 1.5)
+        usage_ratio = total / limit if limit else estimated_ram_bytes / reference_ram_bytes if reference_ram_bytes else None
+        return {"success": True, "collection": collection, "status": state,
+                "vector_count": total, "dimensions": dimensions, "estimated_bytes": estimated_bytes,
+                "estimated_ram_bytes": estimated_ram_bytes, "reference_ram_bytes": reference_ram_bytes,
+                "vector_limit": limit, "usage_ratio": usage_ratio,
+                "warning": usage_ratio is not None and usage_ratio >= .8,
+                "estimate_note": "仅估算 float32 向量正文，不含索引、payload 或其他集合；免费版按资源限制，并无固定向量数上限。"}
+    except Exception as exc:
+        logger.warning("[Qdrant监控] 查询失败（%s）", type(exc).__name__)
+        return {"success": False, "collection": QdrantService.COLLECTION_NAME,
+                "message": "Qdrant 无法连接，请检查 URL、API Key 或服务状态"}
+    finally:
+        if client is not None:
+            client.close()
 
 
 @app.post("/api/settings")
@@ -1447,7 +1595,23 @@ def update_settings(body: SettingsUpdateRequest, current_user: CurrentUser = Dep
     """保存模型配置到本地 config.json"""
     global knowledge_agent, tax_agent
     try:
-        ConfigManager().save_config(body.model_dump(exclude_none=True))
+        old_qdrant = ConfigManager().get_qdrant_config()
+        incoming = body.model_dump(exclude_none=True)
+        candidate = ConfigManager()._save_config_locked(incoming, persist=False)
+        next_qdrant = candidate.get("qdrant", old_qdrant)
+        changed_qdrant = any(next_qdrant.get(key) != old_qdrant.get(key) for key in ("url", "api_key"))
+        if changed_qdrant:
+            # 先检查新地址与密钥，失败时保留原配置和检索客户端。
+            from qdrant_client import QdrantClient
+            client = QdrantClient(url=next_qdrant["url"], api_key=next_qdrant["api_key"] or None,
+                                  timeout=10, check_compatibility=False)
+            try:
+                client.get_collections()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail="Qdrant 无法连接，请检查 URL 和 API Key；原配置已保留") from exc
+            finally:
+                client.close()
+        ConfigManager().save_config(incoming)
         from langchain_openai import ChatOpenAI
         cfg = ConfigManager().get_llm_config()
         if all(cfg.values()) and not cfg["api_key"].startswith("your_"):
@@ -1487,7 +1651,35 @@ def update_settings(body: SettingsUpdateRequest, current_user: CurrentUser = Dep
                     model=cfg["model"], api_key=cfg["api_key"], base_url=cfg["base_url"],
                     temperature=0.2, timeout=30.0, max_retries=2,
                 ))
+        if body.embedding or changed_qdrant:
+            # 更新检索客户端，保留原有文档、索引和 graph。
+            from knowledge.embedding import EmbeddingService, PersistentDocumentStore, QdrantService
+            cloud = QdrantService() if changed_qdrant else None
+            targets = [knowledge_agent, tax_agent]
+            if tax_agent is not None and vars(tax_agent).get("registry") is not None:
+                targets.extend(tax_agent.registry._cache.values())
+            for agent in list(targets):
+                if agent is not None:
+                    targets.extend(child for name in ("policy_agent", "definition_agent") if (child := vars(agent).get(name)) is not None)
+            for agent in targets:
+                if agent is not None and "_embedding_service" in vars(agent):
+                    if agent._embedding_service is None:
+                        agent._store = PersistentDocumentStore()
+                        agent._embedding_service = EmbeddingService(agent._store, skip_rebuild=True)
+                    agent._embedding_service.embedding_model = ConfigManager().get_embedding_config()["model"]
+                    if changed_qdrant:
+                        agent._embedding_service.qdrant = cloud
+                        agent._embedding_service._qdrant_payload_cache.clear()
+            if knowledge_service is not None:
+                svc = knowledge_service._kb._embedding_service
+                if svc is not None:
+                    svc.embedding_model = ConfigManager().get_embedding_config()["model"]
+                    if changed_qdrant:
+                        svc.qdrant = cloud
+                        svc._qdrant_payload_cache.clear()
         return {"success": True, "message": "配置已保存，下次对话生效"}
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
