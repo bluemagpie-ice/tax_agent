@@ -186,25 +186,26 @@ class QdrantService:
     DISTANCE_METRIC = Distance.COSINE
 
 
-    def __init__(self):
+    def __init__(self, *, read_only=False, config=None, client=None):
         """
         初始化 Qdrant 客户端
         """
-        cfg = ConfigManager().get_qdrant_config()
+        cfg = ConfigManager().get_qdrant_config() if config is None else config
         self.api_key = cfg["api_key"]
         self.url = cfg["url"]
 
         if not self.url:
             raise ValueError("缺少 Qdrant URL，请在模型配置中填写")
 
-        self.client = QdrantClient(
+        self.client = client if client is not None else QdrantClient(
             url=self.url,
             api_key=self.api_key or None,
             timeout=30.0,
         )
 
         # 确保集合存在 or 创建集合
-        self._ensure_collection()
+        if not read_only:
+            self._ensure_collection()
 
     def _ensure_collection(self):
         """
@@ -858,6 +859,7 @@ class EmbeddingService:
         use_bm25: bool = True,
         use_neo4j: bool = False,
         skip_rebuild: bool = False,
+        qdrant_read_only: bool = False,
     ):
         """
         :param store:        数据存储对象，需有 get_chunks() 方法
@@ -874,12 +876,15 @@ class EmbeddingService:
 
         # ---------- Qdrant ----------
         self.use_qdrant = use_qdrant
+        self.qdrant_read_only = qdrant_read_only
         self.qdrant: Optional[QdrantService] = None
         if use_qdrant:
             try:
-                self.qdrant = QdrantService()
+                self.qdrant = QdrantService(read_only=True) if qdrant_read_only else QdrantService()
                 logging.info("Qdrant 服务已初始化")
             except Exception as e:
+                if qdrant_read_only:
+                    raise
                 logging.error(f"Qdrant 服务初始化失败: {e}")
                 self.qdrant = None
 
@@ -1138,6 +1143,8 @@ class EmbeddingService:
                 if idx < len(chunks) and scores[idx] > 0
             ]
         except Exception as e:
+            if self.qdrant_read_only:
+                raise
             logging.warning(f"语义检索失效: {e}")
             return []
 

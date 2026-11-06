@@ -1,0 +1,16 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": ["web"],
+  "locale": "zh-CN",
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": ["Select/Listbox", "Form", "Scrollbar", "CRUD"],
+  "ownership": {"Select/Listbox": "native"},
+  "requiredCommands": ["unit", "chat", "research-ui", "syntax"],
+  "commands": {
+    "unit": ".venv/Scripts/python.exe scripts/run_tests.py tests/test_research.py tests/test_research_cases.py tests/test_research_eval.py -q",
+    "chat": "node tests/test_conversation_ui.js",
+    "research-ui": "node tests/test_research_ui.js",
+    "syntax": "node --check web/static/research.js"
+  },
+  "evidence": {"crudFullFlow": "tests/test_research_cases.py", "failurePaths": "tests/test_research.py"}
+}

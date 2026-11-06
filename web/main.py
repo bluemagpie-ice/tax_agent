@@ -39,8 +39,6 @@ config: 配置文件
 把常见的税务缩写、专有名词做成 词典/Q&A。例如：什么是“进项税”、“销项税”、“预扣预缴”、“汇算清缴”。
 为什么需要这个：当用户提问“什么是进项税”时，Agent 可以直接调用定义，避免去几万字的文件里盲目检索。
 
-todo: templates部分的html文件格式需了解。
-todo：更新后的ingest_file和TaxAgent需要理解
 """
 
 # ======日记配置=====
@@ -59,14 +57,14 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, status, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.params import Depends
 from starlette.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import BaseModel, Field, SecretStr, StrictBool
 from services.security import bind_tenant, reset_tenant
 from services.config_manager import ConfigManager, MODEL_PROVIDERS, validate_api_url, infer_provider
 
@@ -205,7 +203,7 @@ async def lifespan(app: FastAPI):
     # 取消所有残余 async 任务，避免 "event loop is closed"
     import asyncio
     # SSE 请求自身负责取消任务；不取消服务器和其他组件拥有的任务。
-    agents = [app.state.knowledge_agent, app.state.tax_agent]
+    agents = [app.state.knowledge_agent, app.state.tax_agent, getattr(app.state, "research_service", None)]
     if app.state.tax_agent is not None:
         agents.extend(app.state.tax_agent.registry._cache.values())
     for agent in list(agents):
@@ -229,6 +227,9 @@ app = FastAPI(
     description="实现税务计算、咨询筹划相关的智能体",
     lifespan=lifespan,
 )
+
+from fastapi.staticfiles import StaticFiles
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "web" / "static")), name="static")
 
 # todo:加入注入依赖到路由函数中。
 
@@ -603,6 +604,21 @@ conversation_memory = None
 policy_updater = None
 kb_manager = None
 
+
+def get_research_service():
+    service = getattr(app.state, "research_service", None)
+    if service is None:
+        from services.research_store import ResearchStore
+        from agents.research_agent import ResearchAgent
+        service = ResearchAgent(ResearchStore())
+        app.state.research_service = service
+    return service
+
+
+from web.research_routes import build_router
+# Register concrete APIRoutes, preserving the existing route-inspection API.
+app.router.routes.extend(build_router(get_current_user, get_research_service).routes)
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     """首页 - 对话界面"""
@@ -766,7 +782,11 @@ async def tax_chat_stream(
                     # 最终正文以编排结果为准，覆盖工具草稿或补齐未流出的降级正文。
                     yield _sse_line("answer", {"text": answer or "（未返回内容）"})
                 logger.info("[流式] 完成耗时 %.2fs", time.perf_counter() - stream_started)
-                yield "event: done\ndata: null\n\n"
+                session = conversation_memory.get_session(session_id) if conversation_memory is not None else None
+                if isinstance(session, dict) and session.get("messages", [])[-2:]:
+                    if [m.get("content") for m in session["messages"][-2:]] != [body.query.strip(), answer]:
+                        session = None
+                yield _sse_line("done", conversation_turn_state(session))
             except asyncio.CancelledError:
                 logger.info("[流式] 客户端断开或服务关闭")
                 raise
@@ -795,17 +815,26 @@ async def tax_chat_stream(
         )
 
 # 新增的修改内容
+def get_knowledge_agent():
+    global knowledge_agent
+    if knowledge_agent is None and tax_agent is not None:
+        knowledge_agent = tax_agent.registry.get("knowledge_agent")
+        app.state.knowledge_agent = knowledge_agent
+    return knowledge_agent
+
+
 @app.get("/api/skills")
 def skills():
-    if knowledge_agent is None:
+    agent = get_knowledge_agent()
+    if agent is None:
         raise HTTPException(status_code=503, detail="请先在模型配置弹窗完成配置")
     """获取 Agent 支持的所有税务技能列表"""
     return {
         "success": True,
         "data": {
-            "name": knowledge_agent.name,
-            "description": knowledge_agent.description,
-            "capabilities": knowledge_agent.capabilities,
+            "name": agent.name,
+            "description": agent.description,
+            "capabilities": agent.capabilities,
             # 子 Agent 能力
             "sub_agents": {
                 "policy_agent": "政策条文解读与适用条件说明",
@@ -827,7 +856,11 @@ async def agent_endpoint(body: TaxQueryRequest, current_user: CurrentUser = Depe
             "source_types": body.source_types,
         }
         messages = [HumanMessage(content=body.query)]
-        result = await knowledge_agent.invoke_messages(messages, input_context=input_context)
+        import asyncio
+        agent = await asyncio.to_thread(get_knowledge_agent)
+        if agent is None:
+            raise HTTPException(503, "请先在模型配置弹窗完成配置")
+        result = await agent.invoke_messages(messages, input_context=input_context)
 
         answer = ""
         for msg in reversed(result["messages"]):
@@ -1177,7 +1210,15 @@ async def get_conversation_messages(session_id: str, current_user: CurrentUser =
         "session_id": session_id,
         "title": title,
         "messages": messages,
+        **conversation_turn_state(session),
     }
+
+
+def conversation_turn_state(session):
+    from agents.memory import ConversationMemory
+    if not isinstance(session, dict):
+        return {"revision": None, "can_retract": False}
+    return {"revision": session.get("_storage_version"), "can_retract": ConversationMemory.has_complete_turn(session)}
 
 
 @app.get("/api/conversations/{session_id}/workflow")
@@ -1280,14 +1321,34 @@ async def clear_conversation_checkpoints(session_id):
 
 
 @app.delete("/api/conversations/{session_id}/messages/last")
-async def retract_last_turn(session_id: str, current_user: CurrentUser = Depends(get_current_user)):
+async def retract_last_turn(session_id: str, current_user: CurrentUser = Depends(get_current_user),
+                           revision: int | None = None):
     """撤回最后一轮对话（移除最新的 user + assistant 消息对）。"""
-    if not conversation_memory:
+    from services.record_store import RecordConflictError
+    if conversation_memory is None:
         raise HTTPException(status_code=503, detail="记忆模块未初始化")
-    ok = conversation_memory.pop_last_turn(session_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="无可撤回的消息")
-    return {"success": True, "session_id": session_id}
+    lock_for = getattr(tax_agent, "conversation_lock", None)
+    lock = lock_for(session_id) if callable(lock_for) else None
+    if lock is not None and lock.locked():
+        raise HTTPException(409, "对话正在回复，请等待完成后再撤回")
+    async with (lock if lock is not None else nullcontext()):
+        session = conversation_memory.get_session(session_id)
+        if session is None:
+            raise HTTPException(404, "对话不存在或不属于当前用户")
+        pending = getattr(tax_agent, "pending_workflow", None)
+        try:
+            paused = inspect.iscoroutinefunction(pending) and await pending(session_id)
+        except Exception as exc:
+            raise HTTPException(503, "暂时无法核对会话工作流状态，请稍后再试") from exc
+        if paused:
+            raise HTTPException(409, "此对话有待处理的工作流，请先完成审批或补充信息")
+        try:
+            updated = conversation_memory.pop_last_turn(session_id, revision=revision)
+            if updated is None:
+                raise HTTPException(409, "没有可撤回的完整问答")
+        except RecordConflictError as exc:
+            raise HTTPException(409, "对话已更新，请刷新后再撤回") from exc
+        return {"success": True, "session_id": session_id, **conversation_turn_state(updated)}
 
 
 # ================================================================
@@ -1520,6 +1581,64 @@ class ModelConnectionRequest(BaseModel):
     api_key: str = Field(default="", max_length=4096)
 
 
+class ChatConnectionRequest(BaseModel):
+    base_url: str = Field(default="", max_length=2048)
+    api_key: SecretStr = SecretStr("")
+    model: str = Field(default="", max_length=512)
+
+
+@app.post("/api/settings/connection")
+def test_chat_connection(body: ChatConnectionRequest, current_user: CurrentUser = Depends(get_current_user)):
+    """Make an actual OpenAI-compatible inference request without saving settings."""
+    from langchain_openai import ChatOpenAI
+    from openai import APIConnectionError, APITimeoutError
+
+    def result(code, message):
+        return {"success": code == "connected", "code": code, "message": message}
+
+    if not body.base_url.strip() or not body.model.strip():
+        return result("configuration_missing", "请填写模型名称和 API 地址。")
+    supplied_key = body.api_key.get_secret_value()
+    if len(supplied_key) > 4096:
+        return result("request_error", "API Key 长度超出配置上限。")
+    try:
+        url = validate_api_url(body.base_url.strip())
+        if url.rstrip("/").endswith(("/chat/completions", "/models", "/responses")):
+            raise ValueError("Expected base URL")
+        key = ConfigManager().resolve_model_key("llm", url, supplied_key)
+    except ValueError:
+        return result("invalid_base_url", "API 地址不正确，请填写提供商的 API 基础地址。")
+    if not key or key.startswith("your_"):
+        return result("configuration_missing", "请填写该 API 地址对应的 Key。")
+    try:
+        model = ChatOpenAI(model=body.model.strip(), api_key=key, base_url=url,
+                           temperature=0, max_retries=0, timeout=20)
+        options = {"reasoning_effort": "low"} if body.model.strip() == "glm-5.3" else {}
+        model.invoke("Reply with OK.", max_tokens=32, **options)
+        return result("connected", "连接成功，模型已响应测试请求。")
+    except APITimeoutError:
+        return result("timeout", "模型请求超时，请检查网络或稍后重试。")
+    except APIConnectionError:
+        return result("network_error", "服务器无法访问模型服务，请检查网络、代理或 API 地址。")
+    except Exception as exc:
+        status = getattr(exc, "status_code", None)
+        logger.warning("[模型连接测试] %s HTTP=%s", type(exc).__name__, status)
+        if status in (401, 403):
+            return result("authentication_failed", "模型服务拒绝认证，请检查 Key 和访问权限。")
+        body = getattr(exc, "body", None)
+        upstream = body.get("error", body) if isinstance(body, dict) else {}
+        code = str(upstream.get("code", "")).lower() if isinstance(upstream, dict) else ""
+        if code in {"model_not_found", "model_not_exist", "invalid_model", "1211"}:
+            return result("model_not_found", "模型不存在或当前账号无权使用，请核对模型名称。")
+        if status in (404, 405):
+            return result("invalid_base_url", "该 API 地址未返回兼容的推理接口，请核对服务商地址和协议。")
+        if status == 429:
+            return result("rate_limit", "服务商限制了请求，请检查额度或稍后重试。")
+        if isinstance(status, int) and status >= 500:
+            return result("provider_error", "模型供应商服务异常，请稍后重试。")
+        return result("request_error", "推理请求失败，请核对模型配置和接口协议。")
+
+
 @app.post("/api/settings/models")
 def probe_models(body: ModelConnectionRequest, current_user: CurrentUser = Depends(get_current_user)):
     """服务端检测 OpenAI 兼容 /models；密钥不回传，也不写入配置。"""
@@ -1592,99 +1711,140 @@ def qdrant_usage(current_user: CurrentUser = Depends(get_current_user)):
 
 @app.post("/api/settings")
 def update_settings(body: SettingsUpdateRequest, current_user: CurrentUser = Depends(get_current_user)):
-    """保存模型配置到本地 config.json"""
-    global knowledge_agent, tax_agent
+    """验证和准备客户端后再提交配置；模型保存不进行推理或向量库探测。"""
+    global tax_agent
+    from langchain_openai import ChatOpenAI
+    from openai import AsyncOpenAI, OpenAI
+    import httpx
+
+    manager = ConfigManager()
+    incoming = body.model_dump(exclude_none=True)
+    started = time.perf_counter()
+    validated = None
     try:
-        old_qdrant = ConfigManager().get_qdrant_config()
-        incoming = body.model_dump(exclude_none=True)
-        candidate = ConfigManager()._save_config_locked(incoming, persist=False)
-        next_qdrant = candidate.get("qdrant", old_qdrant)
-        changed_qdrant = any(next_qdrant.get(key) != old_qdrant.get(key) for key in ("url", "api_key"))
-        if changed_qdrant:
-            # 先检查新地址与密钥，失败时保留原配置和检索客户端。
-            from qdrant_client import QdrantClient
-            client = QdrantClient(url=next_qdrant["url"], api_key=next_qdrant["api_key"] or None,
-                                  timeout=10, check_compatibility=False)
-            try:
-                client.get_collections()
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail="Qdrant 无法连接，请检查 URL 和 API Key；原配置已保留") from exc
-            finally:
-                client.close()
-        ConfigManager().save_config(incoming)
-        from langchain_openai import ChatOpenAI
-        cfg = ConfigManager().get_llm_config()
-        if all(cfg.values()) and not cfg["api_key"].startswith("your_"):
-            if tax_agent is None:
-                from agents.tax_agent import TaxAgent
-                tax_agent = TaxAgent()
-                app.state.tax_agent = tax_agent
-            if knowledge_agent is None:
-                from agents.knowledge_agent import KnowledgeAgent
-                knowledge_agent = KnowledgeAgent()
-                app.state.knowledge_agent = knowledge_agent
-            # 更新现有实例的客户端，保留会话、graph、checkpointer 和 API。
-            agents = [tax_agent, knowledge_agent]
-            registry = vars(tax_agent).get("registry")
-            if registry is not None:
-                registry._cache["knowledge_agent"] = knowledge_agent
-                agents.extend(vars(registry).get("_cache", {}).values())
-            for agent in list(agents):
-                agents.extend(child for name in ("policy_agent", "definition_agent")
-                              if (child := vars(agent).get(name)) is not None)
-            for agent in agents:
-                for attr in ("llm", "extract_llm"):
-                    old = vars(agent).get(attr)
-                    if old is not None:
-                        import httpx as _httpx
-                        setattr(agent, attr, ChatOpenAI(
-                            model=cfg["model"], api_key=cfg["api_key"], base_url=cfg["base_url"],
-                            temperature=getattr(old, "temperature", 0.3),
-                            timeout=_httpx.Timeout(connect=10.0, read=45.0, write=10.0, pool=5.0),
-                            max_retries=2,
-                        ))
-                svc = vars(agent).get("_embedding_service")
-                if svc is not None:
-                    svc.embedding_model = ConfigManager().get_embedding_config()["model"]
-            if conversation_memory is not None:
-                conversation_memory.set_title_llm(ChatOpenAI(
-                    model=cfg["model"], api_key=cfg["api_key"], base_url=cfg["base_url"],
-                    temperature=0.2, timeout=30.0, max_retries=2,
-                ))
-        if body.embedding or changed_qdrant:
-            # 更新检索客户端，保留原有文档、索引和 graph。
-            from knowledge.embedding import EmbeddingService, PersistentDocumentStore, QdrantService
-            cloud = QdrantService() if changed_qdrant else None
-            targets = [knowledge_agent, tax_agent]
-            if tax_agent is not None and vars(tax_agent).get("registry") is not None:
-                targets.extend(tax_agent.registry._cache.values())
-            for agent in list(targets):
-                if agent is not None:
-                    targets.extend(child for name in ("policy_agent", "definition_agent") if (child := vars(agent).get(name)) is not None)
-            for agent in targets:
-                if agent is not None and "_embedding_service" in vars(agent):
-                    if agent._embedding_service is None:
-                        agent._store = PersistentDocumentStore()
-                        agent._embedding_service = EmbeddingService(agent._store, skip_rebuild=True)
-                    agent._embedding_service.embedding_model = ConfigManager().get_embedding_config()["model"]
-                    if changed_qdrant:
-                        agent._embedding_service.qdrant = cloud
-                        agent._embedding_service._qdrant_payload_cache.clear()
-            if knowledge_service is not None:
-                svc = knowledge_service._kb._embedding_service
-                if svc is not None:
-                    svc.embedding_model = ConfigManager().get_embedding_config()["model"]
-                    if changed_qdrant:
-                        svc.qdrant = cloud
-                        svc._qdrant_payload_cache.clear()
+        with manager.stage_config(incoming) as (candidate, commit):
+            validated = time.perf_counter()
+            cfg = manager.get_llm_config(candidate)
+            llm_changed = cfg != manager.get_llm_config()
+            embedding = manager.get_embedding_config(candidate)
+            embedding_changed = embedding != manager.get_embedding_config()
+            qdrant = manager.get_qdrant_config(candidate)
+            previous_qdrant = manager.get_qdrant_config()
+            qdrant_changed = any(qdrant[k] != previous_qdrant[k] for k in ("url", "api_key"))
+
+            next_tax_agent = tax_agent
+            replacements = []
+            if all(cfg.values()) and not cfg["api_key"].startswith("your_"):
+                if next_tax_agent is None:
+                    from agents.tax_agent import TaxAgent
+                    next_tax_agent = TaxAgent(llm_config=cfg)
+                transport_model = vars(next_tax_agent).get("llm")
+
+                def prepare_model(old, temperature, timeout):
+                    nonlocal transport_model
+                    options = {}
+                    for model in (old, transport_model):
+                        sync = getattr(model, "root_client", None)
+                        async_client = getattr(model, "root_async_client", None)
+                        if (isinstance(sync, OpenAI) and isinstance(async_client, AsyncOpenAI)
+                                and str(sync.base_url).rstrip("/") == cfg["base_url"].rstrip("/")):
+                            connection = {"api_key": cfg["api_key"], "base_url": cfg["base_url"],
+                                          "timeout": timeout, "max_retries": 2, "set_default_headers": {}}
+                            sync = sync.with_options(**connection)
+                            async_client = async_client.with_options(**connection)
+                            options = {"root_client": sync, "client": sync.chat.completions,
+                                       "root_async_client": async_client, "async_client": async_client.chat.completions}
+                            break
+                    model = ChatOpenAI(**cfg, temperature=temperature, timeout=timeout, max_retries=2, **options)
+                    transport_model = model
+                    return model
+
+                if llm_changed or tax_agent is None:
+                    registry = vars(next_tax_agent).get("registry")
+                    agents = [tax_agent, knowledge_agent]
+                    if registry is not None:
+                        agents.extend(tuple(registry._cache.values()))
+                    for agent in tuple(agents):
+                        if agent is not None:
+                            agents.extend(vars(agent).get(name) for name in ("policy_agent", "definition_agent"))
+                    for agent in {id(a): a for a in agents if a is not None}.values():
+                        for attr in ("llm", "extract_llm"):
+                            old = vars(agent).get(attr)
+                            if old is not None:
+                                model = prepare_model(old, getattr(old, "temperature", 0.3),
+                                    httpx.Timeout(connect=10.0, read=45.0, write=10.0, pool=5.0))
+                                replacements.append((agent, attr, model))
+                    title_model = (prepare_model(None, 0.2, 30.0)
+                                   if conversation_memory is not None else None)
+                else:
+                    title_model = None
+            else:
+                title_model = None
+            clients_ready = time.perf_counter()
+
+            vector_replacements = []
+            cloud = None
+            if embedding_changed or qdrant_changed:
+                from knowledge.embedding import EmbeddingService, PersistentDocumentStore, QdrantService
+                if qdrant_changed:
+                    from qdrant_client import QdrantClient
+                    client = None
+                    try:
+                        client = QdrantClient(url=qdrant["url"], api_key=qdrant["api_key"] or None,
+                                              timeout=10, check_compatibility=False)
+                        cloud = QdrantService(read_only=True, config=qdrant, client=client)
+                        cloud._ensure_collection()
+                    except Exception as exc:
+                        if client is not None:
+                            client.close()
+                        raise HTTPException(400, "Qdrant 无法连接，请检查 URL 和 API Key；原配置已保留") from exc
+                registry = vars(next_tax_agent).get("registry") if next_tax_agent is not None else None
+                agents = [knowledge_agent, next_tax_agent, *(tuple(registry._cache.values()) if registry else ())]
+                for agent in tuple(agents):
+                    if agent is not None:
+                        agents.extend(vars(agent).get(name) for name in ("policy_agent", "definition_agent"))
+                for agent in {id(a): a for a in agents if a is not None}.values():
+                    if "_embedding_service" not in vars(agent):
+                        continue
+                    svc = agent._embedding_service
+                    if svc is None:
+                        store = PersistentDocumentStore()
+                        svc = EmbeddingService(store, use_qdrant=cloud is None, skip_rebuild=True)
+                        vector_replacements.extend(((agent, "_store", store), (agent, "_embedding_service", svc)))
+                        if cloud is not None:
+                            vector_replacements.append((svc, "use_qdrant", True))
+                    vector_replacements.append((svc, "embedding_model", embedding["model"]))
+                    if cloud is not None:
+                        vector_replacements.extend(((svc, "qdrant", cloud), (svc, "_qdrant_payload_cache", {})))
+                if knowledge_service is not None and (svc := knowledge_service._kb._embedding_service) is not None:
+                    vector_replacements.append((svc, "embedding_model", embedding["model"]))
+                    if cloud is not None:
+                        vector_replacements.extend(((svc, "qdrant", cloud), (svc, "_qdrant_payload_cache", {})))
+            vector_ready = time.perf_counter()
+            if incoming:
+                commit()
+            committed = time.perf_counter()
+            for obj, attr, value in (*replacements, *vector_replacements):
+                setattr(obj, attr, value)
+            if title_model is not None:
+                conversation_memory.set_title_llm(title_model)
+            if next_tax_agent is not tax_agent:
+                tax_agent = app.state.tax_agent = next_tax_agent
+            logger.info("[配置] 校验 %.1fms，模型初始化 %.1fms，向量配置 %.1fms，落盘 %.1fms",
+                        (validated - started) * 1000, (clients_ready - validated) * 1000,
+                        (vector_ready - clients_ready) * 1000, (committed - vector_ready) * 1000)
         return {"success": True, "message": "配置已保存，下次对话生效"}
     except HTTPException:
         raise
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.warning("[配置] 更新失败（%s）", type(e).__name__)
-        raise HTTPException(status_code=500, detail="配置更新失败，请检查模型配置；已保存的配置可在弹窗中查看")
+    except ValueError as exc:
+        if validated is None:
+            raise HTTPException(400, str(exc)) from exc
+        logger.warning("[配置] 客户端准备失败（%s）", type(exc).__name__)
+        raise HTTPException(500, "配置未保存，请检查模型配置后重试") from exc
+    except Exception as exc:
+        logger.warning("[配置] 保存失败（%s）", type(exc).__name__)
+        raise HTTPException(500, "配置未保存，请检查本地磁盘或模型配置后重试") from exc
+
 
 # —— 联网检索结果管理 ——
 

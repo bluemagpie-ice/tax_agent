@@ -1,0 +1,486 @@
+{
+  "version": "candidate-tasks-v1",
+  "notice": "18个独立题目候选与6个调试题；人工核验与案例家族划分均待完成，不能作为已验证标准答案集。",
+  "tasks": [
+    {
+      "task_id": "eval-01",
+      "split": "evaluation",
+      "case_family": "vat-input",
+      "test_category": "helpful_case",
+      "query": "2026年上海一般纳税人采购生产设备取得增值税专用发票，计划用于应税生产。研究进项抵扣还需核对哪些条件。",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-02",
+      "split": "evaluation",
+      "case_family": "vat-export",
+      "test_category": "no_related_case",
+      "query": "2026年境内企业向境外客户提供软件服务，研究是否可以享受增值税零税率，现仅知道客户在境外。",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-03",
+      "split": "evaluation",
+      "case_family": "vat-welfare",
+      "test_category": "similar_text_different_facts",
+      "query": "2026年企业购买设备全部用于员工集体福利，历史生产设备案例能否直接支持抵扣结论？",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-04",
+      "split": "evaluation",
+      "case_family": "vat-local",
+      "test_category": "different_region",
+      "query": "2026年深圳企业取得地方扶持补助，能否照搬上海案例判断增值税？请核查地方适用范围。",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-05",
+      "split": "evaluation",
+      "case_family": "vat-period",
+      "test_category": "different_period",
+      "query": "研究2025年12月已经发生并确认纳税义务的货物销售，应如何确定增值税政策所属期，能否直接使用2026年法律？",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-06",
+      "split": "evaluation",
+      "case_family": "vat-transition",
+      "test_category": "policy_change",
+      "query": "跨越2025年和2026年的长期服务合同，研究增值税法更替时需要核对的纳税义务发生时间。",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-07",
+      "split": "evaluation",
+      "case_family": "vat-unknown",
+      "test_category": "missing_facts",
+      "query": "企业取得一张发票，问是否可以抵扣增值税。纳税人身份、用途、所属期均未知。",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-08",
+      "split": "evaluation",
+      "case_family": "vat-conflict",
+      "test_category": "contradictory_sources",
+      "query": "2026年企业持有旧资料称暂行条例仍适用，另一资料指出增值税法已经施行。请研究依据冲突。",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-09",
+      "split": "evaluation",
+      "case_family": "cit-bad-history",
+      "test_category": "historical_error",
+      "query": "2026年企业年度应纳税所得额250万元、人数280人、资产4500万元，行业符合要求。历史意见称所得税优惠只需检查利润，研究该意见的缺漏。",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-10",
+      "split": "evaluation",
+      "case_family": "cit-private",
+      "test_category": "withdrawn_or_foreign",
+      "query": "2026年企业研究小型微利企业资格，员工和派遣人员合计310人。不得使用已经撤回或其他用户私有案例。",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-11",
+      "split": "evaluation",
+      "case_family": "cit-labor",
+      "test_category": "helpful_case",
+      "query": "2026年企业员工260人、劳务派遣人员50人，研究小型微利企业人数应如何统计。",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-12",
+      "split": "evaluation",
+      "case_family": "cit-industry",
+      "test_category": "similar_text_different_facts",
+      "query": "2026年企业所得额180万元、人数100人、资产2000万元，但行业是否属于限制行业尚未确定，研究优惠适用条件。",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-13",
+      "split": "evaluation",
+      "case_family": "cit-assets",
+      "test_category": "missing_facts",
+      "query": "企业2026年末资产4900万元，其他季度数据未知，研究能否仅按年末资产判断小型微利企业资格。",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-14",
+      "split": "evaluation",
+      "case_family": "cit-date",
+      "test_category": "different_period",
+      "query": "企业拟测算2028年度企业所得税，能否直接套用延续执行至2027年底的小型微利企业政策？",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-15",
+      "split": "evaluation",
+      "case_family": "cit-hitech",
+      "test_category": "no_related_case",
+      "query": "2026年企业同时持有高新技术企业资格并可能符合小型微利企业条件，研究优惠适用及需要补检的依据。",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-16",
+      "split": "evaluation",
+      "case_family": "cit-loss",
+      "test_category": "contradictory_sources",
+      "query": "企业2026年账面亏损但纳税调整后盈利，研究小型微利资格应依据哪个所得指标，现有两份业务说明相互矛盾。",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-17",
+      "split": "evaluation",
+      "case_family": "cit-startup",
+      "test_category": "missing_facts",
+      "query": "企业2026年7月开业，研究人数和资产平均指标的计算期间，尚无季度明细。",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "eval-18",
+      "split": "evaluation",
+      "case_family": "cit-branch",
+      "test_category": "different_region",
+      "query": "总部与跨省分支机构研究2026年小型微利企业优惠，能否分别只按当地人数判断？请核查汇总纳税依据。",
+      "as_of": "2026-11-05",
+      "human_validation": {
+        "status": "pending",
+        "reviewer": null,
+        "basis": null
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "public_law_excerpts_available",
+        "family_assignment_provisional"
+      ],
+      "source_urls": [
+        "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+        "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5210453/content.html"
+      ]
+    },
+    {
+      "task_id": "dev-01",
+      "split": "development",
+      "case_family": "development-1",
+      "test_category": "development",
+      "query": "研究增值税价外税概念及需要哪些资料。",
+      "human_validation": {
+        "status": "pending"
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "development_only"
+      ]
+    },
+    {
+      "task_id": "dev-02",
+      "split": "development",
+      "case_family": "development-2",
+      "test_category": "development",
+      "query": "研究员工工资服务与销售服务的区别。",
+      "human_validation": {
+        "status": "pending"
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "development_only"
+      ]
+    },
+    {
+      "task_id": "dev-03",
+      "split": "development",
+      "case_family": "development-3",
+      "test_category": "development",
+      "query": "研究企业所得税季度预缴应核对的资料。",
+      "human_validation": {
+        "status": "pending"
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "development_only"
+      ]
+    },
+    {
+      "task_id": "dev-04",
+      "split": "development",
+      "case_family": "development-4",
+      "test_category": "development",
+      "query": "研究增值税纳税人登记资料清单。",
+      "human_validation": {
+        "status": "pending"
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "development_only"
+      ]
+    },
+    {
+      "task_id": "dev-05",
+      "split": "development",
+      "case_family": "development-5",
+      "test_category": "development",
+      "query": "研究政策失效与报告引用的区别。",
+      "human_validation": {
+        "status": "pending"
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "development_only"
+      ]
+    },
+    {
+      "task_id": "dev-06",
+      "split": "development",
+      "case_family": "development-6",
+      "test_category": "development",
+      "query": "研究企业所得税汇算清缴资料缺口。",
+      "human_validation": {
+        "status": "pending"
+      },
+      "gold_reference": null,
+      "leakage_flags": [
+        "development_only"
+      ]
+    }
+  ]
+}

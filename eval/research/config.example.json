@@ -1,0 +1,10 @@
+{
+  "dataset": "dataset.json",
+  "policy_snapshot": "policy_snapshot.json",
+  "case_library": "cases.json",
+  "split": "evaluation",
+  "groups": ["A", "B", "C"],
+  "repeats": 1,
+  "schedule_seed": 17,
+  "output_dir": "data/research_eval"
+}

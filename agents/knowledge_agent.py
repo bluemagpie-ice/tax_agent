@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from agents.base_agent import BaseAgent
 from agents.base_context import BaseContext
 from agents.streaming import invoke_answer
+from services.security import collect_answer_sources, check_answer
 
 # 加载 .env 环境变量
 load_dotenv()
@@ -119,6 +120,7 @@ class KnowledgeAgent(BaseAgent):
                 filters = {"source_type": source_types}
             fetch_limit = max(limit * 3, 15)
             raw_results = self._embedding_service.search(query, limit=fetch_limit, filters=filters)
+            raw_results = collect_answer_sources(raw_results)
 
             if not raw_results:
                 return "（知识库中暂未检索到相关内容）"
@@ -190,16 +192,18 @@ class KnowledgeAgent(BaseAgent):
 
         # 3. 拼接完整的消息列表
         system_msg = SystemMessage(
-            content=self.SYSTEM_PROMPT.format(retrieved_context=retrieved_context)
+            content=self.SYSTEM_PROMPT.format(retrieved_context="参考下方独立资料消息；资料不足时说明未核验，不编造依据。")
         )
 
         # 构建完整的消息列表：系统提示 + 历史消息
-        full_messages = [system_msg] + state["messages"]
+        full_messages = [system_msg, SystemMessage(content=retrieved_context, additional_kwargs={"context_optional": True})] + state["messages"]
 
         # 4. 调用 LLM
         import time as _time
         t0 = _time.time()
         response = invoke_answer(self.llm, full_messages)
+        safe_text, _ = check_answer(response.content, [{"source_type": "default", "content": retrieved_context}])
+        response = response.model_copy(update={"content": safe_text})
         logger.info(f"[KnowledgeAgent] LLM 调用完成，耗时 {_time.time() - t0:.1f}s")
 
         # 5. 返回更新后的状态

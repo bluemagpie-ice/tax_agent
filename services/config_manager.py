@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -89,12 +90,12 @@ class ConfigManager:
     # ============================================================
     # LLM 配置
     # ============================================================
-    def get_llm_config(self) -> dict[str, str]:
+    def get_llm_config(self, config: dict | None = None) -> dict[str, str]:
         """
         返回 LLM 配置字典: {model, api_key, base_url}.
         优先 config.json，不存在则回退 .env 环境变量。
         """
-        cfg = _read_config_file()
+        cfg = _read_config_file() if config is None else config
         llm = cfg.get("llm", {})
         return {
             "model": llm.get("model") or os.getenv("LLM_MODEL_ID", ""),
@@ -105,11 +106,11 @@ class ConfigManager:
     # ============================================================
     # Embedding 配置
     # ============================================================
-    def get_embedding_config(self) -> dict[str, str]:
+    def get_embedding_config(self, config: dict | None = None) -> dict[str, str]:
         """
         返回 Embedding 配置字典: {model, api_key, base_url}.
         """
-        cfg = _read_config_file()
+        cfg = _read_config_file() if config is None else config
         emb = cfg.get("embedding", {})
         return {
             "model": emb.get("model") or os.getenv("EMBEDDING_MODEL_ID", ""),
@@ -134,8 +135,8 @@ class ConfigManager:
         provider = infer_provider(base_url)
         return next((os.getenv(name, "") for name in _PROVIDER_KEYS.get(provider, ()) if os.getenv(name)), "")
 
-    def get_qdrant_config(self) -> dict:
-        cfg = _read_config_file().get("qdrant", {})
+    def get_qdrant_config(self, config: dict | None = None) -> dict:
+        cfg = (_read_config_file() if config is None else config).get("qdrant", {})
         return {"url": cfg.get("url") or os.getenv("QDRANT_CLUSTER_URL", ""),
                 "api_key": cfg.get("api_key", os.getenv("QDRANT_API_KEY", "")),
                 "vector_limit": cfg.get("vector_limit", 0)}
@@ -174,7 +175,7 @@ class ConfigManager:
             "llm": {
                 "model": llm_model,
                 "api_key": _mask_key(llm_key),
-                "api_key_set": bool(llm_key),  # 前端据此判断是否已配置
+                "api_key_set": bool(llm_key and not llm_key.startswith("your_")),
                 "base_url": llm_url,
                 "provider": llm_raw.get("provider") or infer_provider(llm_url),
             },
@@ -202,6 +203,13 @@ class ConfigManager:
         """
         with _CONFIG_LOCK:
             self._save_config_locked(data)
+
+    @contextmanager
+    def stage_config(self, data: dict[str, Any]):
+        """Validate once and commit only after callers prepare replacement clients."""
+        with _CONFIG_LOCK:
+            candidate = self._save_config_locked(data, persist=False)
+            yield candidate, lambda: _write_config_file(candidate)
 
     def _save_config_locked(self, data: dict[str, Any], persist: bool = True) -> dict:
         existing = _read_config_file()

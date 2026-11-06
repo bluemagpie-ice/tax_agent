@@ -94,6 +94,7 @@ class ConversationMemory:
         estimated_tokens = self._estimate_tokens(prompt_text)
         return {
             "session_id": session_id,
+            "history_retracted": bool(session.get("history_retracted")),
             "summary": session.get("summary", ""),
             "profile": profile,
             "related_messages": related,
@@ -213,22 +214,29 @@ class ConversationMemory:
             episode["status"] = "inactive"
         self._write(session)
 
-    def pop_last_turn(self, session_id: str) -> bool:
-        """撤回最后一轮对话（移除最新的 user + assistant 消息对）。"""
-        session = self.get_session(session_id)
-        if session is None:
-            return False
+    @staticmethod
+    def has_complete_turn(session: dict) -> bool:
         messages = session.get("messages", [])
-        if len(messages) < 2:
-            return False
-        removed = messages[-2:]
-        if removed[0].get("role") != "user" or removed[1].get("role") != "assistant":
-            return False
-        session["messages"] = messages[:-2]
-        session["turns"] = max(0, int(session.get("turns", 1)) - 1)
-        session["updated_at"] = datetime.now().isoformat()
-        self._write(session)
-        return True
+        return (len(messages) >= 2 and messages[-2].get("role") == "user"
+                and messages[-1].get("role") == "assistant"
+                and not any(message.get("pending") for message in messages[-2:]))
+
+    def pop_last_turn(self, session_id: str, *, revision: int | None = None) -> dict | None:
+        """撤回最后一轮完整问答，返回本次写入的快照。"""
+        from services.record_store import RecordConflictError
+
+        with self._lock:
+            session = self.get_session(session_id)
+            if session is None or not self.has_complete_turn(session):
+                return None
+            if revision is not None and revision != session.get("_storage_version"):
+                raise RecordConflictError("会话已更新")
+            session["messages"] = session["messages"][:-2]
+            session["turns"] = max(0, int(session.get("turns", 1)) - 1)
+            session["updated_at"] = datetime.now().isoformat()
+            session["history_retracted"] = True
+            self._write(session)
+            return session
 
     def ensure_session(self, session_id: str, first_query: str) -> bool:
         """确保会话存在：用户一提问就立即创建，生成标题，不等 AI 回复。

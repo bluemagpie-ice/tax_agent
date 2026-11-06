@@ -267,7 +267,8 @@ class QdrantKnowledgeBase(KnowledgeBase):
         tax_metadata: dict = {}
         for key in ("tax_type", "document_number", "issuer", "effective_date",
                     "law_type", "is_current", "title", "source_type",
-                    "expiry_date", "superseded_by", "owner_id", "scope", "session_id", "file_name"):
+                    "expiry_date", "superseded_by", "owner_id", "scope", "session_id", "file_name",
+                    "source_url", "url", "publish_date", "published_date", "region", "articles"):
             val = kwargs.get(key)
             if val is not None and val != "":
                 tax_metadata[key] = val

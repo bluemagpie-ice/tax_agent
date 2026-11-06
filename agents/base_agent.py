@@ -231,13 +231,21 @@ class BaseAgent(ABC):
             "recursion_limit": kwargs.get("recursion_limit", 50),
         }
 
-        initial_state: dict = {"messages": messages}
+        initial_state: dict = {"messages": self.checkpoint_input(messages, input_context)}
         if hasattr(context, "source_types") and getattr(context, "source_types"):
             initial_state["source_types"] = getattr(context, "source_types")
         initial_state["source_types"] = (input_context or {}).get("source_types")
         initial_state["query_date"] = (input_context or {}).get("query_date")
 
         return await graph.ainvoke(initial_state, config=config)
+
+    @staticmethod
+    def checkpoint_input(messages, context):
+        if (context or {}).get("history_retracted"):
+            from langchain_core.messages import RemoveMessage
+            from langgraph.graph.message import REMOVE_ALL_MESSAGES
+            return [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]
+        return messages
 
     # ------------------------------------------------------------
     # 历史记录 / 状态检查

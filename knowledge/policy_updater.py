@@ -991,9 +991,13 @@ class PolicyUpdater:
 
         file_path = override_path or item.file_path
         file_id = "policy_" + hashlib.sha256(f"{item.unique_key}\0{item.content_hash}".encode("utf-8")).hexdigest()[:32]
+        from services.research_evidence import POLICY_METADATA_FIELDS
         params = {key: item.metadata[key] for key in
-                  ("tax_type", "document_number", "issuer", "effective_date", "is_current", "owner_id", "session_id")
+                  POLICY_METADATA_FIELDS
                   if key in item.metadata}
+        params["source_url"] = item.url or item.metadata.get("source_url") or item.metadata.get("url", "")
+        if item.published_date:
+            params.setdefault("publish_date", item.published_date)
         params.update(file_id=file_id, chunk_preset_id=self.chunk_preset_id, title=item.title,
                       source_type=item.metadata.get("source_type", "default"),
                       scope=item.metadata.get("scope", "system"), file_name=Path(item.file_path or file_path).name)

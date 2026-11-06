@@ -391,6 +391,38 @@
                 <select class="model-select" id="model-select" onchange="onModelChange()"></select>
             </header>
 
+            <nav class="research-mode-tabs" aria-label="咨询模式">
+                <button type="button" id="mode-chat" aria-pressed="true" onclick="taxResearchActions.mode(false)">普通问答</button>
+                <button type="button" id="mode-research" aria-pressed="false" onclick="taxResearchActions.mode(true)">Research 研究</button>
+            </nav>
+            <section id="research-panel" class="research-panel" hidden aria-label="税务研究">
+                <h2>税务研究</h2>
+                <p class="research-muted">拆解问题、核对政策依据，生成可复核的咨询初稿。</p>
+                <p class="research-notice">问题及检索资料会发送至所配置的外部模型；检索也可能调用外部向量服务。请仅输入公开或已泛化资料。本系统不保证本地化处理。</p>
+                <label for="research-task-list">已保存的研究任务</label>
+                <select id="research-task-list"><option value="">新建研究任务</option></select>
+                <form id="research-form" novalidate>
+                    <label for="research-query">客户咨询问题与已知业务事实</label>
+                    <textarea id="research-query" rows="4" maxlength="16000" required style="resize:none" aria-describedby="research-error" placeholder="请说明业务背景、税种、地区及所属期；暂时不清楚的条件可以保留未知。"></textarea>
+                    <label class="research-inline"><input type="checkbox" id="research-web"> 检索并读取官方网页</label>
+                    <button type="submit" id="research-create">创建并开始研究</button>
+                </form>
+                <div class="research-actions">
+                    <button type="button" id="research-run" hidden onclick="taxResearchActions.run()">恢复研究</button>
+                    <button type="button" id="research-stop" hidden onclick="taxResearchActions.stop()">停止本次执行</button>
+                    <button type="button" id="research-refresh" onclick="taxResearchActions.refresh()">刷新任务</button>
+                </div>
+                <p id="research-status" role="status" aria-live="polite"></p>
+                <p id="research-error" role="alert"></p>
+                <div id="research-result"></div>
+                <details id="research-library">
+                    <summary>个人研究案例库</summary>
+                    <p class="research-muted">仅当前用户可见。保存确认与专业复核分别记录。</p>
+                    <button type="button" id="research-cases-refresh" onclick="taxResearchActions.cases()">刷新案例</button>
+                    <div id="research-cases"></div>
+                    <details><summary>人工录入案例</summary><div id="research-case-manual"></div></details>
+                </details>
+            </section>
             <div class="chat" id="chat">
                 <div class="chat-inner" id="chat-inner">
                     <div class="welcome" id="welcome">
@@ -408,7 +440,7 @@
                     <div class="upload-preview" id="upload-preview"></div>
                     <div class="composer-box" id="composer-box">
                         <button class="attach-btn" id="attach-btn" onclick="document.getElementById('file-input').click()" title="上传文件">📎</button>
-                        <textarea id="user-input" rows="1" placeholder="输入你的税务问题…（Enter 发送，Shift+Enter 换行）"></textarea>
+                        <textarea id="user-input" rows="1" style="resize:none" placeholder="输入你的税务问题…（Enter 发送，Shift+Enter 换行）"></textarea>
                         <input type="file" id="file-input" multiple hidden accept=".txt,.md,.pdf,.docx,.xlsx,.csv,.jpg,.jpeg,.png" onchange="handleFiles(this.files)">
                         <button class="send-btn" id="send-btn" onclick="sendMessage()">➤</button>
                     </div>
@@ -431,9 +463,10 @@
             <div class="section-title">LLM 对话模型</div>
             <label>提供商</label><select id="cfg-llm-provider" onchange="selectProvider('llm')"></select>
             <label>模型 ID（可自定义）</label><input id="cfg-llm-model" list="llm-models" placeholder="填写服务商提供的模型 ID"><datalist id="llm-models"></datalist>
-            <label>API Key</label><input id="cfg-llm-key" type="password" placeholder="留空则不修改" autocomplete="off">
-            <label>Base URL</label><input id="cfg-llm-url" type="text" placeholder="https://open.bigmodel.cn/api/paas/v4/">
-            <div><button class="btn" onclick="probeModels('llm', this)">🔗 检测连接</button> <button class="btn" onclick="probeModels('llm', this)">🔍 获取模型列表</button></div>
+            <label for="cfg-llm-key">API Key</label><input id="cfg-llm-key" type="password" aria-describedby="cfg-llm-key-state" autocomplete="off">
+            <p id="cfg-llm-key-state" role="status"></p>
+            <label>Base URL</label><input id="cfg-llm-url" type="text" oninput="showKeyState()" placeholder="https://open.bigmodel.cn/api/paas/v4/">
+            <div><button class="btn" onclick="testChatConnection(this)">🔗 检测连接</button> <button class="btn" onclick="probeModels('llm', this)">🔍 获取模型列表</button></div>
             <p id="cfg-llm-status" role="status"></p>
 
             <div class="section-title">Qdrant 向量存储监控</div>
@@ -450,8 +483,9 @@
             <p style="font-size:12px;color:var(--text-dim);margin-top:4px">当前模式：<span id="cfg-current-role">—</span> — 保存后，在页面顶部角色按钮切换即可生效</p>
             <div class="btn-row">
                 <button class="btn btn-cancel" onclick="closeSettings()">取消</button>
-                <button class="btn btn-primary" onclick="saveSettings()">保存</button>
+                <button class="btn btn-primary" id="settings-save" onclick="saveSettings()">保存</button>
             </div>
+            <p id="settings-save-status" role="status"></p>
         </div>
     </div>
 
@@ -483,6 +517,8 @@
         let currentWorkflow = {};
         const sessionStreams = new Map();
         const conversationViews = new Map();
+        const retractions = new Map();
+        const retractingSessions = new Set();
 
         function saveCurrentView() {
             conversationViews.set(currentSessionId, {...conversationViews.get(currentSessionId), nodes:Array.from(chatInner.childNodes), draft:userInput.value,
@@ -528,6 +564,7 @@
             for (const item of data.artifacts || []) {
                 panel.appendChild(makeActionBtn('下载：' + item.title, () => downloadArtifact(item.id)));
             }
+            updateRetraction();
         }
         async function refreshWorkflow() {
             const sid = currentSessionId;
@@ -541,6 +578,7 @@
         async function resumeApproval(approved) {
             if (streaming || !pendingWorkflow) return;
             const sid = currentSessionId, pause = pendingWorkflow;
+            retractions.delete(sid);
             const controller = new AbortController();
             sessionStreams.set(sid, {controller}); updateSendBtn(); loadConversations();
             const panel = document.getElementById('workflow-panel');
@@ -668,7 +706,10 @@
                 if (text && text.trim()) {
                     actions.appendChild(makeActionBtn('修改', () => { userInput.value = text; userInput.focus(); userInput.dispatchEvent(new Event('input')); }));
                 }
-                actions.appendChild(makeActionBtn('撤回', () => retractMessage(wrap)));
+                const retract = makeActionBtn('撤回最后一轮', () => retractMessage(wrap));
+                retract.className = 'retract-turn';
+                retract.hidden = true;
+                actions.appendChild(retract);
             } else {
                 if (lastUserQuery()) {
                     actions.appendChild(makeActionBtn('重新生成', () => regenerate(wrap)));
@@ -696,21 +737,43 @@
             try { document.execCommand('copy'); } catch (e) {}
             document.body.removeChild(ta); showToast('已复制');
         }
+        function updateRetraction() {
+            const buttons = [...chatInner.querySelectorAll('.retract-turn')];
+            const ready = retractions.get(currentSessionId)?.can_retract && !pendingWorkflow
+                && !sessionStreams.has(currentSessionId) && !retractingSessions.has(currentSessionId);
+            buttons.forEach((button, index) => { button.hidden = !ready || index !== buttons.length - 1; });
+        }
         async function retractMessage(userWrap) {
+            const sid = currentSessionId, token = AUTH_TOKEN;
+            const button = userWrap.querySelector('.retract-turn');
+            const revision = retractions.get(sid)?.revision;
+            const assistantWrap = userWrap.nextElementSibling;
+            if (button?.hidden || !Number.isInteger(revision) || !assistantWrap?.classList.contains('assistant')
+                || sessionStreams.has(sid) || retractingSessions.has(sid) || pendingWorkflow) return;
+            retractingSessions.add(sid); updateSendBtn();
             try {
-                const response = await fetch(`/api/conversations/${currentSessionId}/messages/last`, {
+                const response = await fetch(`/api/conversations/${encodeURIComponent(sid)}/messages/last?revision=${revision}`, {
                     method: 'DELETE',
-                    headers: { 'Authorization': AUTH_TOKEN },
+                    headers: { 'Authorization': token },
                 });
-                if (!response.ok) { const error = await response.json(); throw new Error(error.detail || '撤回失败'); }
-            } catch (e) { /* 后端确认成功后才移除 DOM */ showToast(e.message || '撤回失败', true); return; }
-            let next = userWrap.nextElementSibling;
-            while (next && next.classList && next.classList.contains('message')) {
-                const after = next.nextElementSibling;
-                if (next.classList.contains('assistant')) { next.remove(); break; }
-                next = after;
+                const data = await response.json();
+                if (!response.ok) {
+                    if ([404, 409].includes(response.status)) retractions.delete(sid);
+                    throw new Error(data.detail || '撤回失败');
+                }
+                if (token !== AUTH_TOKEN) return;
+                assistantWrap.remove(); userWrap.remove();
+                const view = conversationViews.get(sid);
+                if (view?.nodes) view.nodes = view.nodes.filter(n => n !== userWrap && n !== assistantWrap);
+                retractions.set(sid, data);
+                showToast('已撤回最后一轮问答');
+                loadConversations();
+            } catch (e) {
+                showToast(e.message || '撤回失败', true);
+            } finally {
+                retractingSessions.delete(sid);
+                updateSendBtn();
             }
-            userWrap.remove();
         }
         function regenerate(assistantWrap) {
             const q = lastUserQuery();
@@ -818,6 +881,9 @@
             const text = userInput.value.trim();
             if (!text) return;
             const sid = currentSessionId;
+            if (retractingSessions.has(sid)) return;
+            retractions.delete(sid);
+            localStorage.setItem('tax_agent_session_id', sid);
             const requestToken = AUTH_TOKEN;
             const activeFiles = pendingFiles.filter(Boolean);
             if (activeFiles.some(f => f.status === 'uploading')) { showToast('文件上传中，请稍候…', true); return; }
@@ -896,7 +962,8 @@
                             try { const payload = JSON.parse(dataStr); error = payload.msg || payload; } catch (e) {}
                             answerText += '\n\n⚠️ ' + error;
                         } else if (type === 'done') {
-                            // 流式结束
+                            const turn = JSON.parse(dataStr);
+                            if (turn && Number.isInteger(turn.revision) && requestToken === AUTH_TOKEN) retractions.set(sid, turn);
                         }
                     }
                 }
@@ -968,11 +1035,12 @@
                     </div>`;
                 }
                 list.innerHTML = html || '<div class="conv-group-label">暂无对话</div>';
+                return convs;
             } catch (e) { console.error('加载会话失败', e); }
         }
-        async function selectConversation(sessionId) {
-            if (sessionId === currentSessionId) return;
-            saveCurrentView();
+        async function selectConversation(sessionId, restore = false) {
+            if (sessionId === currentSessionId && !restore) return;
+            if (!restore) saveCurrentView();
             currentSessionId = sessionId;
             localStorage.setItem('tax_agent_session_id', sessionId);
             restoreView(sessionId);
@@ -990,6 +1058,7 @@
                 if (!resp.ok) throw new Error(data.detail || '历史读取失败');
                 const view = conversationViews.get(sessionId);
                 if (!view) return;
+                retractions.set(sessionId, data);
                 view.title = data.title || '税务智能助手';
                 if (sessionId === currentSessionId) document.getElementById('main-title').textContent = view.title;
                 if (data.messages) {
@@ -1112,7 +1181,9 @@
             const active = pendingFiles.filter(Boolean);
             const uploading = active.some(f => f.status === 'uploading');
             sendBtn.disabled = !run && (uploading || !!conversationViews.get(currentSessionId)?.loading);
+            sendBtn.disabled ||= retractingSessions.has(currentSessionId);
             sendBtn.title = uploading ? '文件上传中，请稍候…' : '';
+            updateRetraction();
         }
         async function handleFiles(files) {
             const sid = currentSessionId, requestToken = AUTH_TOKEN, uploadEntries = pendingFiles;
@@ -1233,11 +1304,24 @@
         }
 
         // ---------- 设置弹窗 ----------
-        async function loadSettings() {
+        let settingsSaving = false, settingsGeneration = 0, savedSettings = null;
+        function disableSettingsInputs(disabled) {
+            document.querySelectorAll('#settings-modal input, #settings-modal select').forEach(field => { field.disabled = disabled; });
+        }
+        function showKeyState() {
+            const sameAddress = document.getElementById('cfg-llm-url').value.trim().replace(/\/+$/, '')
+                === savedSettings?.llm.base_url.replace(/\/+$/, '');
+            document.getElementById('cfg-llm-key-state').textContent = sameAddress && savedSettings.llm.api_key_set
+                ? '已配置 API Key。留空保留，填入新 Key 可替换。'
+                : sameAddress ? '尚未配置 API Key。' : 'API 地址已变化，请确认新地址使用的 Key。';
+        }
+        async function loadSettings(generation) {
+            const status = document.getElementById('settings-save-status');
             try {
                 const resp = await fetch('/api/settings', { headers: { 'Authorization': AUTH_TOKEN } });
                 const data = await resp.json();
                 if (!resp.ok) throw new Error(data.detail || '配置加载失败');
+                if (generation !== settingsGeneration) return;
                 const cfg = data.config;
                 modelProviders = data.providers || {};
                 for (const [prefix, section] of [['llm', 'llm']]) {
@@ -1254,7 +1338,7 @@
                 document.getElementById('cfg-qdrant-key').value = '';
                 document.getElementById('cfg-qdrant-key').placeholder = cfg.qdrant.api_key_set ? '已配置；同一地址留空保留' : '自建实例可留空';
                 document.getElementById('cfg-qdrant-limit').value = cfg.qdrant.vector_limit;
-                refreshQdrant();
+                document.getElementById('cfg-qdrant-status').textContent = '点击刷新查看已保存地址的状态。';
                 const llm = document.getElementById('llm-models');
                 llm.innerHTML = ''; (discoveredModels[cfg.llm.base_url] || [cfg.llm.model]).filter(Boolean).forEach(id => {
                     const o = document.createElement('option'); o.value = id; o.textContent = id;
@@ -1262,9 +1346,15 @@
                 });
                 document.getElementById('cfg-llm-model').value = cfg.llm.model;
                 document.getElementById('cfg-llm-key').value = '';
-                document.getElementById('cfg-llm-key').placeholder = cfg.llm.api_key_set ? '已配置；留空则保留' : '请输入 API Key';
                 document.getElementById('cfg-llm-url').value = cfg.llm.base_url;
-            } catch (e) { showToast(e.message, true); }
+                savedSettings = cfg;
+                showKeyState();
+                status.textContent = '';
+                disableSettingsInputs(false);
+                document.getElementById('settings-save').disabled = false;
+            } catch (e) {
+                if (generation === settingsGeneration) status.textContent = '读取配置失败，请关闭后重新打开。';
+            }
         }
         function selectProvider(prefix) {
             const provider = document.getElementById('cfg-' + prefix + '-provider').value;
@@ -1273,6 +1363,24 @@
             document.getElementById('cfg-' + prefix + '-model').value = '';
             document.getElementById(prefix === 'llm' ? 'llm-models' : 'emb-models').replaceChildren();
             document.getElementById('cfg-' + prefix + '-status').textContent = '填写该提供商模型；密钥可留空使用服务端同提供商配置。';
+            showKeyState();
+        }
+        async function testChatConnection(button) {
+            const status = document.getElementById('cfg-llm-status');
+            const fields = ['url', 'model', 'key'].map(name => document.getElementById('cfg-llm-' + name));
+            const [base_url, model, api_key] = fields.map(field => field.value.trim());
+            button.disabled = true; status.textContent = '正在请求模型…'; status.style.color = 'var(--text-dim)';
+            try {
+                const response = await fetch('/api/settings/connection', {method:'POST',
+                    headers:{Authorization:AUTH_TOKEN,'Content-Type':'application/json'},
+                    body:JSON.stringify({base_url,model,api_key})});
+                const data = await response.json();
+                if (fields.some((field, i) => field.value.trim() !== [base_url, model, api_key][i])) return;
+                status.textContent = response.ok ? data.message : '连接检测请求失败，请重新登录后重试。';
+                status.style.color = response.ok && data.success ? '#22a060' : '#dc3545';
+            } catch {
+                status.textContent = '无法访问应用服务器，请检查应用是否仍在运行。'; status.style.color = '#dc3545';
+            } finally {button.disabled = false;}
         }
         async function probeModels(prefix, button) {
             const status = document.getElementById('cfg-' + prefix + '-status');
@@ -1309,34 +1417,73 @@
             finally { if (button) button.disabled = false; }
         }
         function showSettings() {
+            if (settingsSaving) return;
             document.getElementById('cfg-user-token').value = getTokenForRole('user') !== DEFAULT_USER_TOKEN ? getTokenForRole('user') : '';
             document.getElementById('cfg-user-token').placeholder = getTokenForRole('user') || DEFAULT_USER_TOKEN;
             document.getElementById('cfg-admin-token').value = getTokenForRole('admin') !== DEFAULT_ADMIN_TOKEN ? getTokenForRole('admin') : '';
             document.getElementById('cfg-admin-token').placeholder = getTokenForRole('admin') || DEFAULT_ADMIN_TOKEN;
             document.getElementById('cfg-current-role').textContent = currentRole === 'admin' ? '🛡️ 管理员' : '👤 普通用户';
-            loadSettings();
+            savedSettings = null;
+            disableSettingsInputs(true);
+            document.getElementById('settings-save').disabled = true;
+            document.getElementById('settings-save-status').textContent = '正在读取已保存配置…';
+            document.getElementById('cfg-llm-key-state').textContent = '';
             document.getElementById('settings-modal').classList.add('show');
+            loadSettings(++settingsGeneration);
         }
-        function closeSettings() { document.getElementById('cfg-llm-key').value = ''; document.getElementById('cfg-qdrant-key').value = ''; document.getElementById('cfg-user-token').value = ''; document.getElementById('cfg-admin-token').value = ''; document.getElementById('settings-modal').classList.remove('show'); }
+        function closeSettings() {
+            if (settingsSaving) return;
+            settingsGeneration++;
+            savedSettings = null;
+            for (const id of ['cfg-llm-key', 'cfg-qdrant-key', 'cfg-user-token', 'cfg-admin-token']) {
+                document.getElementById(id).value = '';
+            }
+            document.getElementById('settings-modal').classList.remove('show');
+        }
         async function saveSettings() {
-            const userToken = document.getElementById('cfg-user-token').value.trim();
-            const adminToken = document.getElementById('cfg-admin-token').value.trim();
-            if (userToken) sessionStorage.setItem('tax_agent_user_token', userToken);
-            if (adminToken) sessionStorage.setItem('tax_agent_admin_token', adminToken);
-            AUTH_TOKEN = getAuthToken();
-            const body = {
-                llm: { provider:document.getElementById('cfg-llm-provider').value, model: document.getElementById('cfg-llm-model').value, api_key: document.getElementById('cfg-llm-key').value, base_url: document.getElementById('cfg-llm-url').value },
-                embedding: { model: 'BAAI/bge-m3' },
-                qdrant: {url:document.getElementById('cfg-qdrant-url').value, api_key:document.getElementById('cfg-qdrant-key').value, vector_limit:Number(document.getElementById('cfg-qdrant-limit').value)},
-            };
-            if (!body.qdrant.url.trim()) delete body.qdrant;
+            if (settingsSaving || !savedSettings) return;
+            const read = id => document.getElementById(id).value.trim();
+            const userToken = read('cfg-user-token'), adminToken = read('cfg-admin-token');
+            const auth = currentRole === 'admin' ? adminToken : userToken;
+            const requestToken = auth ? 'Bearer ' + auth : AUTH_TOKEN;
+            const llm = {provider:read('cfg-llm-provider'), model:read('cfg-llm-model'),
+                api_key:read('cfg-llm-key'), base_url:read('cfg-llm-url')};
+            const body = {};
+            if (llm.api_key || ['provider', 'model', 'base_url'].some(key => llm[key] !== savedSettings.llm[key])) {
+                if (llm.api_key === '') delete llm.api_key;
+                body.llm = llm;
+            }
+            const qdrant = {url:read('cfg-qdrant-url'), api_key:read('cfg-qdrant-key'),
+                vector_limit:Number(read('cfg-qdrant-limit'))};
+            if (qdrant.url && (qdrant.api_key || qdrant.url !== savedSettings.qdrant.url
+                    || qdrant.vector_limit !== savedSettings.qdrant.vector_limit)) body.qdrant = qdrant;
+            const button = document.getElementById('settings-save');
+            const status = document.getElementById('settings-save-status');
+            settingsSaving = button.disabled = true;
+            disableSettingsInputs(true);
+            status.textContent = '正在保存配置…';
+            let saved = false;
             try {
-                const resp = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': AUTH_TOKEN }, body: JSON.stringify(body) });
+                const resp = await fetch('/api/settings', {method:'POST', headers:{
+                    'Content-Type':'application/json', 'Authorization':requestToken}, body:JSON.stringify(body),
+                    signal:AbortSignal.timeout(body.qdrant ? 45000 : 20000)});
                 const result = await resp.json();
-                if (!resp.ok) throw new Error(result.detail || '保存失败');
-                closeSettings(); showToast('✅ 配置已保存');
+                if (!resp.ok || !result.success) throw new Error(typeof result.detail === 'string' ? result.detail : '保存失败');
+                if (userToken) sessionStorage.setItem('tax_agent_user_token', userToken);
+                if (adminToken) sessionStorage.setItem('tax_agent_admin_token', adminToken);
+                AUTH_TOKEN = getAuthToken();
+                saved = true;
+            } catch (e) {
+                status.textContent = e.name === 'TimeoutError' || e instanceof TypeError
+                    ? '未收到保存结果。请重新打开设置核对已保存状态。' : e.message;
+            } finally {
+                settingsSaving = button.disabled = false;
+                disableSettingsInputs(false);
+            }
+            if (saved) {
+                closeSettings(); showToast('配置已保存');
                 loadModels(); loadMe(); loadConversations();
-            } catch (e) { showToast(e.message, true); }
+            }
         }
 
         // ---------- 用户信息 / 角色切换 ----------
@@ -1388,13 +1535,15 @@
                 document.getElementById('role-dropdown').classList.remove('show');
                 return;
             }
-            if (sessionStreams.size) { showToast('请先停止正在回复的对话，再切换身份', true); return; }
+            if (sessionStreams.size || retractingSessions.size || window.taxResearchBusy) { showToast('请先完成或停止正在执行的操作，再切换身份', true); return; }
             currentRole = role;
             sessionStorage.setItem('tax_agent_role', role);
             AUTH_TOKEN = getAuthToken();
             for (const view of conversationViews.values()) for (const entry of view.files || []) entry?.xhr?.abort();
+            window.dispatchEvent(new Event('tax-auth-changed'));
             for (const entry of pendingFiles) entry?.xhr?.abort();
             conversationViews.clear();
+            retractions.clear();
             newConversation();
             conversationViews.clear();
             updateRoleUI();
@@ -1409,11 +1558,19 @@
         // ---------- 初始化 ----------
         initTheme();
         renderSuggestions();
-        loadConversations();
+        const initialSessionId = currentSessionId;
+        loadConversations().then(convs => {
+            if (currentSessionId === initialSessionId && !conversationViews.has(initialSessionId)
+                && !sessionStreams.has(initialSessionId) && convs?.some(c => c.session_id === initialSessionId)) {
+                selectConversation(initialSessionId, true);
+            }
+        });
         loadModels();
         loadMe();
         refreshWorkflow().catch(error => showToast(error.message, true));
         toggleSidebar(window.innerWidth > 768);
     </script>
+    <link rel="stylesheet" href="/static/research.css">
+    <script src="/static/research.js"></script>
 </body>
 </html>

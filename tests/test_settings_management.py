@@ -57,6 +57,40 @@ def test_bad_key_and_custom_endpoint_do_not_reuse_other_key(settings_app, monkey
                        json={"section":"llm", "base_url":"https://custom.example"}).status_code == 401
 
 
+def test_connection_runs_inference_without_saving_or_exposing_key(settings_app, monkeypatch):
+    _, client, config = settings_app
+    factory = MagicMock()
+    monkeypatch.setattr("langchain_openai.ChatOpenAI", factory)
+    payload = {"base_url":config.MODEL_PROVIDERS["GLM"], "model":"glm-test"}
+    response = client.post("/api/settings/connection", headers=USER, json=payload)
+    assert response.json()["code"] == "connected"
+    factory.return_value.invoke.assert_called_once()
+    assert factory.call_args.kwargs["api_key"] == "original-glm-secret"
+    assert not config._CONFIG_FILE.exists() and "original-glm-secret" not in response.text
+
+
+@pytest.mark.parametrize(("status", "body", "expected"), [
+    (401, {}, "authentication_failed"),
+    (404, {"code":"model_not_found"}, "model_not_found"),
+    (404, {}, "invalid_base_url"),
+    (429, {}, "rate_limit"),
+    (503, {}, "provider_error"),
+    (400, {}, "request_error"),
+])
+def test_inference_connection_errors_are_classified(settings_app, monkeypatch, status, body, expected):
+    _, client, config = settings_app
+    factory = MagicMock()
+    failure = RuntimeError("provider response with a private string")
+    failure.status_code = status
+    failure.body = body
+    factory.return_value.invoke.side_effect = failure
+    monkeypatch.setattr("langchain_openai.ChatOpenAI", factory)
+    response = client.post("/api/settings/connection", headers=USER,
+                           json={"base_url":config.MODEL_PROVIDERS["GLM"], "model":"glm-test"})
+    assert response.json()["code"] == expected and not response.json()["success"]
+    assert "private string" not in response.text
+
+
 def test_switch_provider_and_custom_model_save_without_old_key(settings_app):
     _, _, config = settings_app
     manager = config.ConfigManager()
@@ -72,6 +106,66 @@ def test_switch_provider_and_custom_model_save_without_old_key(settings_app):
     manager.save_config({"llm":{"provider":"自定义", "base_url":config.MODEL_PROVIDERS["GLM"], "model":"glm-test"}})
     assert manager.get_llm_config()["api_key"] == "original-glm-secret"
     assert manager.get_all_config()["llm"]["provider"] == "自定义"
+
+
+def test_key_save_updates_chat_and_research_without_starting_rag(settings_app, monkeypatch):
+    from agents.research_agent import ResearchAgent
+    from langchain_openai import ChatOpenAI
+    import httpx
+
+    main, client, config = settings_app
+    chat = SimpleNamespace(llm=SimpleNamespace(temperature=0.3), registry=SimpleNamespace(_cache={}))
+    knowledge = SimpleNamespace(llm=SimpleNamespace(temperature=0.7), _embedding_service=None)
+    monkeypatch.setattr(main, "tax_agent", chat)
+    monkeypatch.setattr(main, "knowledge_agent", knowledge)
+    monkeypatch.setattr(main, "conversation_memory", None)
+    monkeypatch.setenv("EMBEDDING_MODEL_ID", "BAAI/bge-m3")
+    vector = MagicMock(side_effect=AssertionError("model-only save cannot initialize the vector store"))
+    monkeypatch.setattr("knowledge.embedding.EmbeddingService", vector)
+    new_key = "demo-new-test-credential"
+    seen = []
+    def fake_provider(request):
+        seen.append(request.headers["Authorization"])
+        return httpx.Response(200, json={"id":"fake", "model":"glm-test", "choices":[
+            {"index":0, "finish_reason":"stop", "message":{"role":"assistant","content":"fixture OK"}}
+        ]})
+    transport = httpx.MockTransport(fake_provider)
+    http = httpx.Client(transport=transport)
+    monkeypatch.setattr("langchain_openai.ChatOpenAI", lambda **kw: ChatOpenAI(**kw, http_client=http))
+    response = client.post("/api/settings", headers=USER, json={
+        "llm": {"api_key": new_key}, "embedding": {"model": "BAAI/bge-m3"},
+    })
+    assert response.status_code == 200
+    vector.assert_not_called()
+    assert config.ConfigManager().get_llm_config()["api_key"] == new_key
+    assert chat.llm.openai_api_key.get_secret_value() == new_key
+    assert knowledge.llm.openai_api_key.get_secret_value() == new_key
+    research = ResearchAgent.model(SimpleNamespace(_llm=None))
+    try:
+        assert chat.llm.invoke("test").content == "fixture OK"
+        assert research.invoke("test").content == "fixture OK"
+        assert seen == [f"Bearer {new_key}"] * 2
+    finally:
+        http.close()
+    current = client.get("/api/settings", headers=USER)
+    assert current.json()["config"]["llm"]["api_key_set"] is True
+    assert new_key not in current.text and new_key not in response.text
+    assert client.post("/api/settings", headers=USER, json={"llm":{"api_key":""}}).status_code == 200
+    assert config.ConfigManager().get_llm_config()["api_key"] == new_key
+
+
+def test_client_initialization_failure_keeps_disk_and_running_model(settings_app, monkeypatch):
+    main, client, config = settings_app
+    model = SimpleNamespace(temperature=0.3)
+    chat = SimpleNamespace(llm=model, registry=SimpleNamespace(_cache={}))
+    monkeypatch.setattr(main, "tax_agent", chat)
+    config.ConfigManager().save_config({"llm": {"api_key": "old-test-fixture"}})
+    before = config._CONFIG_FILE.read_bytes()
+    monkeypatch.setattr("langchain_openai.ChatOpenAI", MagicMock(side_effect=RuntimeError("constructor failed")))
+    response = client.post("/api/settings", headers=USER, json={"llm":{"api_key":"new-test-fixture"}})
+    assert response.status_code == 500
+    assert config._CONFIG_FILE.read_bytes() == before and chat.llm is model
+    assert "new-test-fixture" not in response.text
 
 
 def test_qdrant_live_count_estimate_warning_and_optional_key(settings_app, monkeypatch):

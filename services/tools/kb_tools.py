@@ -16,6 +16,7 @@ import base64
 import time
 import socket
 import ipaddress
+import re
 import xml.etree.ElementTree as ET
 from copy import deepcopy
 from urllib.parse import urlparse, parse_qs
@@ -44,6 +45,7 @@ def search_tax_policy(
     tax_type: Optional[str] = None,
     limit: int = 5,
     is_current: Optional[bool] = None,
+    *, research: bool = False,
 ) -> list[dict]:
     """
     从本地税务知识库检索相关条文（纯函数入口，Agent 内部强制调用）。
@@ -53,7 +55,7 @@ def search_tax_policy(
     :param limit: 返回前 N 条
     :param is_current: 可选，True=只搜现行有效，False=只搜已废止
     :return: 列表，每项包含 id / score / content / file_id 以及 title / document_number / issuer / effective_date / law_type / tax_type / is_current 等元数据
-             注意：is_current 缺失时默认 False（不盲目认定为现行有效，避免已废止文件误导）
+             注意：is_current 缺失时保留 None（未知不等于有效，也不等于已废止）
     """
     try:
         from knowledge.embedding import EmbeddingService, PersistentDocumentStore
@@ -65,7 +67,7 @@ def search_tax_policy(
         if is_current is not None:
             filters["is_current"] = is_current
 
-        cache_key = (current_tenant_id(), document_session.get(), query.strip(), tax_type or "", limit, is_current,
+        cache_key = (current_tenant_id(), document_session.get(), query.strip(), tax_type or "", limit, is_current, research,
                      ConfigManager().get_embedding_config()["model"])
         cached = _search_cache.get(cache_key)
         if cached is not None:
@@ -73,11 +75,12 @@ def search_tax_policy(
             return deepcopy(cached)
 
         store = PersistentDocumentStore()
-        svc = EmbeddingService(store=store, use_qdrant=True, skip_rebuild=True)
+        options = {"qdrant_read_only": True, "use_bm25": False, "use_neo4j": False} if research else {}
+        svc = EmbeddingService(store=store, use_qdrant=True, skip_rebuild=True, **options)
 
         # 加一点检索增强（让 RRF 的 BM25 分支也受益）
-        enhanced = f"税法 政策 条文 {query}"
-        results = svc.search(enhanced, limit=limit, filters=filters or None)
+        enhanced = query if research else f"税法 政策 条文 {query}"
+        results = svc.search(enhanced, limit=limit, mode="semantic" if research else "rrf", filters=filters or None)
 
         # 格式化输出
         formatted = []
@@ -85,20 +88,25 @@ def search_tax_policy(
             formatted.append({
                 "id": r.get("id", ""),
                 "file_id": r.get("file_id", ""),
-                "title": r.get("title", ""),
+                "title": r.get("title", "") or r.get("file_name", ""),
                 "document_number": r.get("document_number", ""),
                 "issuer": r.get("issuer", ""),
                 "effective_date": r.get("effective_date", ""),
                 "law_type": r.get("law_type", ""),
                 "tax_type": r.get("tax_type", ""),
-                "is_current": r.get("is_current", False),
+                "is_current": r.get("is_current"),
                 "score": r.get("score", 0),
                 "content": r.get("content", ""),
+                **{key: r.get(key) for key in ("source_url", "url", "publish_date", "published_date",
+                    "region", "expiry_date", "superseded_by", "articles", "source_type", "owner_id", "scope", "session_id", "status")
+                   if key in r},
             })
         _search_cache.set(cache_key, formatted)
         return deepcopy(formatted)
 
     except Exception as e:
+        if research:
+            raise
         logger.error(f"[search_tax_policy] 检索失败: {e}", exc_info=True)
         return []
 
@@ -240,15 +248,18 @@ def _bing_rss_search(query: str, limit: int = 5) -> list[dict]:
         return []
 
 
-def read_web_page(url: str, max_chars: int = 10000) -> dict:
+def read_web_page(url: str, max_chars: int = 10000, *, official_only: bool = False) -> dict:
     """读取公开网页正文；校验每次跳转、限制大小，失败返回可见的结构化错误。"""
     from bs4 import BeautifulSoup
     from urllib.parse import urljoin
+    from services.research_evidence import official_url
     max_chars = max(200, min(int(max_chars), 15000))
     started = time.monotonic()
     try:
         for _ in range(4):
             parsed = urlparse(url)
+            if official_only and not official_url(url):
+                raise ValueError("政策原文读取只接受官方站点及其官方跳转")
             if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
                 raise ValueError("仅支持无账号密码的 HTTP/HTTPS 网页链接")
             addresses = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
@@ -263,23 +274,67 @@ def read_web_page(url: str, max_chars: int = 10000) -> dict:
                     continue
                 response.raise_for_status()
                 mime = response.headers.get("Content-Type", "").lower()
-                if mime and not any(t in mime for t in ("text/", "html", "xml")):
+                is_pdf = official_only and ("application/pdf" in mime or parsed.path.lower().endswith(".pdf"))
+                if mime and not is_pdf and not any(t in mime for t in ("text/", "html", "xml")):
                     raise ValueError("此链接不是可读取的文本网页，请上传对应文档")
                 content = bytearray()
                 for piece in response.iter_content(16384):
                     content.extend(piece)
                     if len(content) > 2_000_000 or time.monotonic() - started > 12:
                         raise ValueError("网页过大或读取超过时间预算")
-                soup = BeautifulSoup(bytes(content), "html.parser")
-                title = soup.title.get_text(" ", strip=True) if soup.title else parsed.hostname
-                for node in soup(["script", "style", "noscript", "nav", "footer", "header"]):
-                    node.decompose()
-                body = soup.select_one("article, main, .TRS_Editor, #zoom, #content") or soup.body or soup
-                text = body.get_text("\n", strip=True)
+                metadata = {}
+                if is_pdf:
+                    from io import BytesIO
+                    from pypdf import PdfReader
+                    from pypdf.errors import PdfReadError
+                    try:
+                        pdf = PdfReader(BytesIO(content))
+                        text = "\n".join(page.extract_text() or "" for page in pdf.pages[:12])
+                    except (PdfReadError, ValueError) as exc:
+                        raise ValueError("官方 PDF 附件正文读取失败") from exc
+                    title = next((line.strip() for line in text.splitlines() if len(line.strip()) >= 6), "官方政策附件")
+                    metadata["truncated"] = len(pdf.pages) > 12
+                else:
+                    soup = BeautifulSoup(bytes(content), "html.parser")
+                    title = soup.title.get_text(" ", strip=True) if soup.title else parsed.hostname
+                    for node in soup(["script", "style", "noscript", "nav", "footer", "header"]):
+                        node.decompose()
+                    if official_only:
+                        title_tag = soup.select_one("meta[name='ArticleTitle'], meta[property='og:title']")
+                        if title_tag and title_tag.get("content"):
+                            title = title_tag["content"].strip()
+                        published = soup.select_one("meta[name='PubDate'], meta[property='article:published_time']")
+                        if published:
+                            metadata["publish_date"] = published.get("content")
+                        for selector, key in ((".dfsj", "response_date"), (".arc_date", "document_date")):
+                            label = soup.select_one(selector)
+                            if label:
+                                date = re.search(r"\d{4}[-年/]\d{1,2}[-月/]\d{1,2}日?", label.get_text())
+                                if date:
+                                    metadata[key] = date.group()
+                    body = (soup.select_one(".TRS_Editor, .contentLeft, #zoom, #artibody, .article-content")
+                            if official_only else None) or soup.select_one("article, main, #content") or soup.body or soup
+                    text = body.get_text("\n", strip=True)
+                    if official_only:
+                        metadata["attachments"] = list(dict.fromkeys(
+                            link for tag in body.select("a[href]")
+                            if official_url(link := urljoin(url, tag["href"])) and urlparse(link).path.lower().endswith(".pdf")
+                        ))[:2]
+                if official_only:
+                    date = re.search(r"(?:答复时间|发布日期|发布时间)\s*[：:]?\s*(\d{4}[-年/]\d{1,2}[-月/]\d{1,2}日?)", text)
+                    if date and not metadata.get("publish_date"):
+                        metadata["publish_date"] = date.group(1)
+                    number = re.search(r"(?m)^\s*(?:财政部\s*税务总局|国家税务总局|税务总局)\s*公告\s*\d{4}\s*年\s*第\s*\d+\s*号", text[:1300])
+                    if number:
+                        metadata["document_number"] = number.group().strip()
+                        metadata["issuer"] = "财政部、税务总局" if number.group().strip().startswith("财政部") else "国家税务总局"
+                    effective = re.search(r"(?:本(?:公告|办法|规定|条例)|现予公布[，,]\s*)自\s*(\d{4}年\s*\d{1,2}月\s*\d{1,2}日)起施行", text)
+                    if effective:
+                        metadata["effective_date"] = re.sub(r"\s+", "", effective.group(1))
                 if not text:
                     raise ValueError("网页没有可读取正文，可能需要登录或动态加载")
-                return {"status": "success", "url": url, "title": title, "content": text[:max_chars],
-                        "truncated": len(text) > max_chars}
+                return {**metadata, "status": "success", "url": url, "title": title, "content": text[:max_chars],
+                        "truncated": len(text) > max_chars or metadata.get("truncated", False)}
         raise ValueError("网页跳转次数过多")
     except (requests.RequestException, ValueError, OSError) as exc:
         logger.warning("网页读取失败（%s）", type(exc).__name__)
@@ -334,6 +389,38 @@ def search_web_policy(
             break
 
     return deduped
+
+
+def search_official_research(query: str, limit: int = 2, *, by_title: bool = False) -> list[dict]:
+    """Use the public search endpoint used by the STA policy library page."""
+    from bs4 import BeautifulSoup
+    from services.research_evidence import official_url
+
+    params = {"searchWord": query, "siteCode": "bm29000002", "indexCode": 1, "searchSiteName": "GSFFK",
+              "column": "政策法规,政策解读,政策指引", "pageNum": 0, "pageSize": 5, "participleRule": 0}
+    if by_title:
+        params.update(column="政策法规", wordPlace=1, type=0)
+    response = requests.get("https://www.chinatax.gov.cn/search5/search/s",
+                            headers={**_SEARCH_HEADERS, "Referer": "https://fgk.chinatax.gov.cn/"},
+                            params=params, timeout=(3, 6), allow_redirects=False)
+    response.raise_for_status()
+    results = []
+    for row in response.json()["searchResultAll"]["searchTotal"]:
+        url = row.get("url") or ""
+        if not official_url(url):
+            continue
+        parsed = urlparse(url)
+        host = "fgk.chinatax.gov.cn" if parsed.hostname == "www.chinatax.gov.cn" and parsed.path.startswith("/zcfgk/") else parsed.netloc
+        url = parsed._replace(scheme="https", netloc=host, fragment="").geturl()
+        if any(item["url"] == url for item in results):
+            continue
+        title = BeautifulSoup(row.get("title") or "", "html.parser").get_text()
+        results.append({"title": title, "url": url, "source": "sta_policy_search", "rank": len(results) + 1})
+    if by_title:
+        def title_key(title):
+            return re.sub(r"[\s《》〈〉]", "", title)
+        results = [item for item in results if title_key(query) in title_key(item["title"])]
+    return results[:limit]
 
 def _search_gov_sites(query: str, limit: int = 5) -> list[dict]:
     """定向搜索财政部 / 国家税务总局官网。"""

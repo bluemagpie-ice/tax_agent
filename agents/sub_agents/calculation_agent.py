@@ -27,7 +27,8 @@ from langchain_openai import ChatOpenAI
 
 from services.config_manager import ConfigManager
 from agents.sub_agents.rag_sub_agent import RAGSubAgent
-from agents.streaming import invoke_answer
+from agents.streaming import invoke_answer, bounded_invoke
+from services.security import check_answer
 from services.calculators import (
     calculate_vat,
     calculate_corporate_income_tax,
@@ -213,6 +214,8 @@ stamp_duty 使用 category、contract_amount、is_small_scale。不要把进项�
 
         # 3. 执行精确计算
         calculation_result_dict: str
+        calc_dict = None
+        calculation = None
         if extraction_result and extraction_result.get("calculator_type") != "none":
             calc_type = extraction_result["calculator_type"]
             raw_params = extraction_result.get("params") or {}
@@ -224,6 +227,13 @@ stamp_duty 使用 category、contract_amount、is_small_scale。不要把进项�
 
             calc_dict = self._run_calculator(calc_type, raw_params)
             if calc_dict:
+                tool_names = {"vat": "calculate_vat", "corporate_income": "calculate_corporate_income_tax",
+                              "individual_annual": "calculate_individual_income_annual", "monthly_withholding": "calculate_monthly_wage_withholding",
+                              "surcharges": "calculate_surcharges", "stamp_duty": "calculate_stamp_duty"}
+                params = _normalize_vat_params(raw_params) if calc_type == "vat" else (_normalize_corp_params(raw_params) if calc_type == "corporate_income" else raw_params)
+                if calc_type in tool_names:
+                    calculation = {"tool": tool_names[calc_type], "args": params,
+                                   "output": json.dumps(calc_dict, ensure_ascii=False), "status": "success"}
                 # 格式化给 LLM 看：把 CalcResult 关键字段转成人类可读文本
                 calculation_result_dict = self._format_calc_result_for_prompt(calc_dict)
                 logger.info(
@@ -242,19 +252,30 @@ stamp_duty 使用 category、contract_amount、is_small_scale。不要把进项�
         system_msg = SystemMessage(
             content=self.SYSTEM_PROMPT.format(
                 calculation_result=calculation_result_dict,
-                retrieved_context=retrieved_context,
+                retrieved_context="参考下方独立资料消息；未检索支持的静态计算器文号不能引用为已核验法规。",
             )
         )
 
-        full_messages = [system_msg] + state["messages"]
+        full_messages = [system_msg, SystemMessage(content=retrieved_context, additional_kwargs={"context_optional": True})] + state["messages"]
 
         # 6. LLM 生成最终解释
         response = invoke_answer(self.llm, full_messages)
+        safe_text, safety = check_answer(response.content, [{"source_type": "default", "content": retrieved_context}])
+        if calc_dict and "unsupported_citation" in safety["issues"]:
+            # 草稿法规未通过核验时，仍可发布独立代码计算的数字，不能保留错误引用/推论。
+            corrected = f"草稿中的法规引用未通过核验，已拦截；不据此认定优惠资格。\n\n按用户给定条件的代码计算：应纳税额 {calc_dict['tax_amount']:.2f} 元。"
+            safe_text, corrected_safety = check_answer(corrected)
+            corrected_safety["corrected_issues"] = safety["issues"]
+            corrected_safety["changed"] = True
+            safety = corrected_safety
+        response = response.model_copy(update={"content": safe_text})
 
         return {
             "messages": [response],
             "step_count": state.get("step_count", 0) + 1,
             "retrieved_context": retrieved_context,
+            "guardrails": safety,
+            "calculation": calculation,
         }
 
     # ==============================================================
@@ -265,7 +286,7 @@ stamp_duty 使用 category、contract_amount、is_small_scale。不要把进项�
         prompt = self.EXTRACT_PARAMS_PROMPT.format(query=query)
 
         try:
-            raw = self.extract_llm.invoke(prompt)
+            raw = bounded_invoke(self.extract_llm, prompt)
             text = raw.content if hasattr(raw, "content") else str(raw)
 
             # 清理可能的 markdown 标记

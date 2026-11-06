@@ -1,0 +1,26 @@
+[hidden] { display: none !important; }
+.research-mode-tabs { display:flex; gap:8px; padding:8px 24px; border-bottom:1px solid var(--border); }
+.research-mode-tabs button, .research-panel button { padding:8px 14px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); cursor:pointer; font:inherit; }
+.research-mode-tabs [aria-pressed="true"], .research-panel button[type="submit"] { background:var(--primary); color:white; }
+.research-panel { flex:1; min-height:0; overflow:auto; padding:24px max(20px, calc((100% - 900px)/2)); scrollbar-gutter:stable; }
+.research-panel h2 { font-size:22px; }
+.research-panel h3 { font-size:17px; margin-top:20px; }
+.research-panel p { margin:8px 0; white-space:pre-wrap; overflow-wrap:anywhere; }
+.research-muted { color:var(--text-dim); }
+.research-notice { background:var(--primary-soft); padding:12px; border-radius:8px; font-size:13px; }
+.research-panel label { display:block; margin:12px 0 5px; }
+.research-panel textarea, .research-panel select { width:100%; padding:10px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); font:inherit; }
+.research-panel textarea { resize:vertical; min-height:100px; }
+.research-panel .research-inline { display:flex; gap:8px; align-items:center; }
+.research-actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+.research-panel button:disabled { opacity:.55; cursor:wait; }
+.research-panel details { padding:10px 0; border-bottom:1px solid var(--border); }
+.research-panel summary { cursor:pointer; overflow-wrap:anywhere; }
+.research-panel pre { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; font-size:14px; }
+.research-panel a { color:var(--primary); }
+#research-error { color:var(--text); border-left:3px solid var(--primary); padding-left:10px; }
+#research-error:empty { display:none; }
+.research-panel :focus-visible, .research-mode-tabs :focus-visible { outline:2px solid var(--primary); outline-offset:3px; }
+html { scrollbar-color:var(--text-dim) var(--bg); scrollbar-width:thin; }
+@media (max-width:600px) { .research-mode-tabs { padding:8px 12px; } .research-panel { padding:16px; } }
+@media (prefers-reduced-motion:reduce) { .research-panel * { animation:none !important; scroll-behavior:auto !important; } }

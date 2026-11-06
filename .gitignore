@@ -2,8 +2,14 @@
 # 敏感凭证 —— 绝对不能提交
 # ========================================
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!.env.*.example
+!.env.template
+/secrets/
+*.key
+*.p12
+*.pfx
 
 # ========================================
 # Python 环境
@@ -15,23 +21,31 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 *.egg
+/build/
+/dist/
 
 # ========================================
 # LangGraph 持久化数据（checkpoint 数据库）
 # ========================================
-agents/**/checkpoints.sqlite3
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
 
 # ========================================
 # 知识库 / 上传文件
 # ========================================
-data/
-config.json
-uploads/
-*.db
-*.sqlite3
+/data/
+/uploads/
+/eval/research/config.json
+/.paddlex/
+/.paddleocr/
 
 # ========================================
 # 日志
@@ -44,6 +58,7 @@ logs/
 # 调试 / MCP 追踪
 # ========================================
 .statamcp/
+/premium-audit.json
 
 # ========================================
 # IDE
@@ -52,24 +67,28 @@ logs/
 .idea/
 *.swp
 .DS_Store
+Thumbs.db
+Desktop.ini
 
 # ========================================
 # 测试 / 缓存
 # ========================================
 .pytest_cache/
+.test_runs/
 .mypy_cache/
 .ruff_cache/
 coverage.xml
+.coverage
+.coverage.*
 htmlcov/
-tests/fixtures/
+# 仅允许已核验的纯文本测试样本；发票影像及其他本地样本留在本地
+/tests/fixtures/*
+!/tests/fixtures/test_txt.txt
+!/tests/fixtures/test_csv.csv
 
 # ========================================
 # 快照备份 / 临时文件
 # ========================================
 _snapshot_*/
 *.bak
-
-# ========================================
-# 无关内容
-# ========================================
-简历文案.md
+*.tmp
