@@ -2,10 +2,10 @@
 (() => {
     'use strict';
     const el = id => document.getElementById(id);
-    let task = null, controller = null, busy = false;
+    let task = null, controller = null, busy = false, timer = null, statusAt = Date.now();
     const stages = {created:'待开始', understand:'提取业务事实', retrieve:'检索政策', report:'整理研究报告',
         cases:'比较历史案例', plan:'制定研究计划', assess:'核查研究证据', calculate:'核对计算条件', supplement:'补充研究', prepare_clarification:'等待补充事实',
-        finalized:'已确认定稿', awaiting_review:'等待报告复核', awaiting_facts:'等待补充事实', failed:'执行失败，可恢复', interrupted:'执行已停止，可恢复'};
+        finalized:'已确认定稿', awaiting_review:'等待报告复核', awaiting_facts:'等待补充事实', failed:'执行失败', interrupted:'执行已停止，可恢复'};
     const node = (tag, text, parent) => { const n = document.createElement(tag); n.textContent = text; if(parent) parent.append(n); return n; };
     let fieldId=0;
     function field(parent,title,value='',multiline=true) {
@@ -57,15 +57,16 @@
         select.value=task?.task_id || '';
     }
     function renderStatus() {
-        const label=stages[task.status] || stages[task.stage] || task.status;
+        const label=task.status === 'running' ? stages[task.stage] || '正在运行' : stages[task.status] || stages[task.stage] || task.status;
         const activity=task.activity ? ' · ' + task.activity : '';
-        el('research-status').textContent=label + activity + ' · 任务 ' + task.task_id.slice(0,8);
+        el('research-status').textContent=label + activity + ' · 已用 ' + Math.floor(((task.elapsed_ms || 0) + (busy ? Date.now()-statusAt : 0))/1000) + ' 秒 · 任务 ' + task.task_id.slice(0,8);
     }
     function render() {
         const result=el('research-result'); result.replaceChildren();
         el('research-run').hidden=!task || ['finalized','awaiting_review','awaiting_facts'].includes(task.status);
         if(!task) {el('research-status').textContent='创建研究任务后，进度和报告会保存在当前用户下。'; return;}
         renderStatus();
+        el('research-run').textContent=task.resume_stage || task.status === 'interrupted' ? '从已保存步骤恢复' : task.status === 'failed' ? '重新研究（从头执行）' : '开始研究';
         const questionCount=task.question_count ?? task.questions?.length;
         if(questionCount) node('p',`初步证据已覆盖 ${task.completed_questions || 0}/${questionCount} 个子问题（仍需人工核验）`,result).id='research-coverage-count';
         if(task.failure) {
@@ -73,7 +74,7 @@
             node('p',task.failure.message,result);
             const refs=task.failure.details?.unmatched_citations || task.failure.details?.validation?.unmatched_citations;
             if(refs?.length) node('p','未匹配的引用：'+refs.join('、'),result);
-            node('p','可查看证据缺口，然后重新运行任务。',result);
+            node('p',task.resume_stage ? '已保留证据，可从失败步骤恢复。' : '请查看证据缺口；重新研究将从头执行并重新检索。',result);
         }
         if(task.status === 'awaiting_facts') {
             node('h3','待确认事实',result);
@@ -119,7 +120,7 @@
             const detail=node('details','',result); node('summary',evidence.title,detail);
             const date=evidence.response_date ? '官方答复日期：'+evidence.response_date :
                 evidence.document_date ? '成文日期：'+evidence.document_date : '发布日期：'+(evidence.publish_date || '未知');
-            node('p',`发布机关：${evidence.issuer || '未知'}\n${date}\n实施日期：${evidence.effective_date || '未知'}\n地区：${evidence.region || '未知'}\n效力：待核实；业务适用性：待核实`,detail);
+            node('p',`发布机关：${evidence.issuer || '未知'}\n${date}\n实施日期：${evidence.effective_date || '未知'}\n地区：${evidence.region || '未知'}\n效力：${evidence.is_current === false || evidence.superseded_by ? '已标记失效或被替代' : evidence.is_current === true ? '来源标记有效，仍需核验' : '未知，待核实'}；业务适用性：待核实`,detail);
             if(/^https?:\/\//i.test(evidence.source_url || '')) {const a=node('a','查看来源',detail); a.href=evidence.source_url; a.target='_blank'; a.rel='noopener noreferrer';}
             for(const passage of passages) node('pre',passage.content,detail);
             const debug=node('details','',detail); node('summary','证据调试详情',debug);
@@ -177,9 +178,19 @@
         }
     }
     async function action(fn) {
-        if(busy) return; setBusy(true); el('research-error').textContent='';
-        try {await fn();} catch(error) {el('research-error').textContent=error.name === 'AbortError' ? '本次执行已停止。刷新任务后可以恢复。' : error.message;}
-        finally {controller=null; setBusy(false);}
+        if(busy) return;
+        const auth=AUTH_TOKEN;
+        setBusy(true); el('research-error').textContent=''; statusAt=Date.now();
+        if(typeof setInterval === 'function') timer=setInterval(() => {if(task) renderStatus();},1000);
+        try {await fn();}
+        catch(error) {
+            el('research-error').textContent=error.name === 'AbortError' ? '执行已停止，正在读取保存状态。' : error.message;
+            if(task && auth===AUTH_TOKEN) {
+                try { task=await (await api(`/tasks/${task.task_id}`)).json(); render(); await list(); }
+                catch { el('research-error').textContent+=' 无法读取保存状态，请稍后刷新。'; }
+            }
+        }
+        finally {if(timer !== null) clearInterval(timer); timer=null; controller=null; setBusy(false);}
     }
     async function run(operation={}) {
         controller=new AbortController();
@@ -191,10 +202,11 @@
             buffer+=decoder.decode(value,{stream:true}); let end;
             while((end=buffer.indexOf('\n\n')) >= 0) {
                 const frame=buffer.slice(0,end); buffer=buffer.slice(end+2);
+                if(frame.startsWith(':')) { if(task) renderStatus(); continue; }
                 const line=frame.split('\n').find(x => x.startsWith('data: ')); if(!line) continue;
                 const event=JSON.parse(line.slice(6));
                 if(event.type==='status') {
-                    task={...task,activity:'',...event};
+                    task={...task,activity:'',...event}; statusAt=Date.now();
                     renderStatus();
                     if(event.question_count) {
                         const count=el('research-coverage-count') || node('p','',el('research-result'));

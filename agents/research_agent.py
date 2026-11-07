@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 import re
 import time
 from contextvars import ContextVar
@@ -37,6 +38,7 @@ async def progress(stage, activity):
 class Understanding(BaseModel):
     facts: list[str] = Field(default_factory=list, max_length=30)
     unknowns: list[str] = Field(default_factory=list, max_length=3, description="只列用户能补充且尚未提供的业务事实问题")
+    unknown_kinds: dict[str, Literal["fact", "policy"]] = Field(default_factory=dict, description="unknowns逐项按原文标注业务事实fact或政策规则policy")
     tax_types: list[str] = Field(default_factory=list, max_length=5)
     region: str | None = None
     tax_period: str | None = None
@@ -47,6 +49,7 @@ class Understanding(BaseModel):
 
 
 class Analysis(BaseModel):
+    question_id: str = ""
     question: str
     finding: str
     evidence_ids: list[str] = Field(default_factory=list)
@@ -136,7 +139,7 @@ class ResearchAgent(BaseAgent):
         from services.config_manager import ConfigManager
         from langchain_openai import ChatOpenAI
         cfg = ConfigManager().get_llm_config()
-        if not cfg.get("api_key") or not cfg.get("model") or not cfg.get("base_url"):
+        if not cfg.get("api_key") or cfg["api_key"].startswith("your_") or not cfg.get("model") or not cfg.get("base_url"):
             raise ValueError("请先配置模型、API Key 和 Base URL")
         return ChatOpenAI(**{k: cfg[k] for k in ("model", "api_key", "base_url")},
                           temperature=0, max_retries=0, timeout=45)
@@ -169,13 +172,17 @@ class ResearchAgent(BaseAgent):
         metrics = data.setdefault("metrics", {"llm_calls": [], "tool_calls": []})
         budget = {**DEFAULT_BUDGET, **data.get("budget", {})}
         try:
-            messages, reserve = await asyncio.to_thread(prepare_context, model, messages)
+            messages, reserve = await asyncio.to_thread(prepare_context, model, messages,
+                window=os.getenv("RESEARCH_CONTEXT_WINDOW"), output_reserve=os.getenv("RESEARCH_MAX_OUTPUT_TOKENS"))
         except ValueError as exc:
             raise ResearchFailure("context_budget", "当前材料超出模型上下文，请缩小问题范围") from exc
         model_name = getattr(model, "model_name", "") or ""
         upper = sum(count_tokens(str(m.content), model_name)[0] + 12 for m in messages) + reserve
         upper = max(upper, 0)
-        if len(metrics["llm_calls"]) >= budget["llm_calls"] or data.get("token_upper_spent", 0) + upper > budget["token_upper_budget"]:
+        report_call = schema is ResearchReport
+        reserved_calls = 0 if report_call else 2
+        reserved_tokens = 0 if report_call else min(16000, budget["token_upper_budget"] // 4)
+        if len(metrics["llm_calls"]) >= budget["llm_calls"] - reserved_calls or data.get("token_upper_spent", 0) + upper > budget["token_upper_budget"] - reserved_tokens:
             data["stop_reason"] = "budget_exhausted"
             raise ResearchBudgetExceeded("研究模型调用预算耗尽")
         await progress(data.get("stage", "report"), "修正模型输出" if repairing else "正在调用模型")
@@ -185,6 +192,9 @@ class ResearchAgent(BaseAgent):
                 "prompt_evidence": {m.additional_kwargs["research_evidence_id"]: json.loads(m.content)["evidence"]["content"]
                                     for m in messages if m.additional_kwargs.get("research_evidence_id")}}
         metrics["llm_calls"].append(call)
+        dropped = {e["evidence_id"] for e in payload.get("evidence", [])} - set(call["prompt_evidence"])
+        if dropped:
+            data.setdefault("warnings", []).append("上下文预算裁剪了证据：" + ", ".join(sorted(dropped)))
         try:
             options = {"reasoning_effort":"low"} if getattr(model,"model_name","") == "glm-5.3" else {}
             try:
@@ -195,6 +205,9 @@ class ResearchAgent(BaseAgent):
                                       details={"provider_error_type": type(exc).__name__}) from exc
             call["response"] = str(result.content)
             call["usage"] = getattr(result, "usage_metadata", None)
+            actual = (call["usage"] or {}).get("total_tokens")
+            if isinstance(actual, int) and actual >= 0:
+                data["token_upper_spent"] += actual - upper
             call["model_id"] = getattr(model, "model_name", None)
             call["response_model_id"] = getattr(result, "response_metadata", {}).get("model_name")
             raw = str(result.content).strip()
@@ -207,8 +220,10 @@ class ResearchAgent(BaseAgent):
                 call["latency_ms"] = round((time.perf_counter() - started) * 1000)
                 if repairing:
                     raise ResearchFailure("structured_output_invalid", "模型两次未返回有效结构化内容") from exc
-                return await self.ask(data, instruction + "\n上次返回不是有效的结构化JSON。请修正语法和结构；保留事实与证据边界，不添加推测。",
-                                      payload, schema, repairing=True)
+                details = [{"field": list(error["loc"]), "message": error["msg"], "type": error["type"]}
+                           for error in exc.errors(include_input=False)][:20]
+                return await self.ask(data, instruction + "\n请根据具体结构错误修正JSON，保留事实与证据边界。",
+                                      {**payload, "structure_errors": details, "candidate_output": raw[:12000]}, schema, repairing=True)
         except Exception as exc:
             call["error_type"] = type(exc).__name__
             raise
@@ -216,6 +231,11 @@ class ResearchAgent(BaseAgent):
             call.setdefault("latency_ms", round((time.perf_counter() - started) * 1000))
 
     async def tool(self, data, name, func, *args, **kwargs):
+        used = len(data.get("metrics", {}).get("tool_calls", []))
+        limit = {**DEFAULT_BUDGET, **data.get("budget", {})}["tool_calls"]
+        if name in ("search_web_policy", "read_web_page") and used >= limit - max(1, len(data.get("plan", []))):
+            data.setdefault("warnings", []).append("官网工具预算已达预留边界，保留本地政策检索预算")
+            return []
         if len(data.setdefault("metrics", {"llm_calls": [], "tool_calls": []})["tool_calls"]) >= {**DEFAULT_BUDGET, **data.get("budget", {})}["tool_calls"]:
             data["stop_reason"] = "tool_budget_exhausted"
             return []
@@ -256,10 +276,14 @@ class ResearchAgent(BaseAgent):
             {"query": data["query"], "reference_date": datetime.now(timezone(timedelta(hours=8))).date().isoformat()}, Understanding)
         parsed["facts"] = [f for f in parsed["facts"] if f and f in data["query"]]
         policy_question = re.compile(r"免税标准|起征点|预征率|适用税率|征收率|政策适用期间|是否(?:需要|必须|应当)预缴|是否(?:适用|享受|符合).{0,12}(?:免税|优惠|政策)|(?:预缴|免税).{0,6}(?:标准|门槛)")
+        def is_policy(question):
+            kind = parsed.get("unknown_kinds", {}).get(question)
+            return kind == "policy" if kind else bool(policy_question.search(question) and not re.search(r"已经|曾经|享受过|是否有", question))
         for question in parsed["unknowns"]:
-            if policy_question.search(question) and question not in parsed["questions"] and len(parsed["questions"]) < 4:
+            if is_policy(question) and question not in parsed["questions"] and len(parsed["questions"]) < 4:
                 parsed["questions"].append(question)
-        parsed["unknowns"] = list(dict.fromkeys(q for q in parsed["unknowns"] if not policy_question.search(q)))
+        parsed["unknowns"] = list(dict.fromkeys(q for q in parsed["unknowns"] if not is_policy(q)))
+        parsed["facts"] = list(dict.fromkeys([*data.get("facts", []), *parsed["facts"]]))
         data.update(parsed)
         data["status"] = "running"
         return data
@@ -274,6 +298,7 @@ class ResearchAgent(BaseAgent):
                             "round": data.get("clarification_rounds", 0) + 1})
         data["clarification_rounds"] = data.get("clarification_rounds", 0) + 1
         data["skip_unknowns"] = bool(answer.get("skip_unknowns"))
+        data["clarification_has_reply"] = bool(answer.get("reply", "").strip())
         if answer.get("reply", "").strip():
             data["query"] += "\n用户补充：" + answer["reply"].strip()
         data["status"] = "running"
@@ -316,7 +341,11 @@ class ResearchAgent(BaseAgent):
         seen = set()
         for step in parsed["steps"]:
             if step["step_id"] in seen or not set(step["depends_on"]).issubset(seen):
-                raise ValueError("研究计划包含重复编号、循环或未知依赖")
+                step["step_id"] = "step_" + str(len(seen) + 1)
+                while step["step_id"] in seen:
+                    step["step_id"] += "_"
+                step["depends_on"] = [dependency for dependency in step["depends_on"] if dependency in seen]
+                data.setdefault("warnings", []).append("规划编号或依赖无效，已规范为有限顺序检索")
             seen.add(step["step_id"])
         data["plan"] = parsed["steps"]
         return data
@@ -402,12 +431,6 @@ class ResearchAgent(BaseAgent):
             if not question_ids and step["question"] in data["questions"]:
                 question_ids = [next(qid for qid, question in known_questions.items() if question == step["question"])]
             step_id = f"{data.get('research_rounds', 0) + 1}:{step.get('step_id', index)}"
-            if data.get("web_search"):
-                options = {"source": "gov_cn"} if self.web_search else {}
-                results = await self.tool(data, "search_web_policy", self.web_search or search_official_research,
-                                          query, limit=2, **options)
-                for result in results:
-                    await read_source(result.get("url"), question_ids, step_id)
             options = {} if self.search else {"research": True}
             records = await self.tool(data, "search_tax_policy", self.search or search_tax_policy, query, limit=4, **options)
             if not self.search:
@@ -415,6 +438,12 @@ class ResearchAgent(BaseAgent):
             for record in records:
                 if record.get("content") and document_visible(record):
                     add(record, "policy_rag", question_ids, step_id)
+            if data.get("web_search"):
+                options = {"source": "gov_cn"} if self.web_search else {}
+                results = await self.tool(data, "search_web_policy", self.web_search or search_official_research,
+                                          query, limit=2, **options)
+                for result in results:
+                    await read_source(result.get("url"), question_ids, step_id)
         data["candidates"] = list(candidates.values())
         data["research_rounds"] = data.get("research_rounds", 0) + 1
         data["new_evidence_count"] = len(candidates) - previous_count
@@ -425,9 +454,8 @@ class ResearchAgent(BaseAgent):
         previous = data.get("assessment") or {}
         known_questions = self.question_map(data)
         # Prefer verified source URLs and representative passages over repeated chunks.
-        ordered = sorted(candidates, key=lambda e: (e["kind"] == "official_web",
-                         bool(e.get("document_number") or e.get("response_date")), bool(e.get("source_url")),
-                         e.get("retrieval_score") or 0), reverse=True)
+        ordered = sorted(candidates, key=lambda e: (bool(e.get("question_ids")),
+                         e.get("retrieval_score") or 0, e.get("source_check") == "official_domain"), reverse=True)
         selected = []
         by_document = {}
         for item in ordered:
@@ -439,7 +467,8 @@ class ResearchAgent(BaseAgent):
             if len(selected) >= 8:
                 break
         assessed = previous
-        if selected and (not previous or data.get("new_evidence_count")):
+        selected_ids = sorted(e["evidence_id"] for e in selected)
+        if selected and (not previous or selected_ids != data.get("assessed_evidence_ids")):
             try:
                 assessed = await self.ask(data,
                     "为每个子问题标注question_id。只选择直接讨论所问业务、规则、期间或适用条件的证据。"
@@ -454,6 +483,8 @@ class ResearchAgent(BaseAgent):
                      "tax_period": data.get("tax_period"), "region": data.get("region")}, Assessment)
             except ResearchBudgetExceeded:
                 pass
+            else:
+                data["assessed_evidence_ids"] = selected_ids
         by_id = {e["evidence_id"]: e for e in candidates}
         calls = data.get("metrics", {}).get("llm_calls", [])
         visible = calls[-1].get("prompt_evidence", {}) if assessed is not previous and calls else {}
@@ -490,13 +521,24 @@ class ResearchAgent(BaseAgent):
                     match = temporal.search("".join(evidence_text(eid).split()))
                     if match:
                         period[eid] = match.group()
-            time_supported = not required_year or any(required_year.group() in quote for quote in period.values())
-            gap = item.get("gap") or ("缺少可核对的原文摘录" if not excerpts else
+            from services.policy_validity import period_status
+            time_state = period_status(period.values(), data.get("tax_period"))
+            time_supported = time_state in ("supported", "pending_verification", "not_requested")
+            if time_state == "pending_verification":
+                data.setdefault("warnings", []).append("政策仅有起始日期，未核验后续废止情况；所属期适用性待人工核对")
+            valid_sources = all(by_id[eid].get("is_current") is not False and not by_id[eid].get("superseded_by") for eid in excerpts)
+            gap = item.get("gap") or ("证据已失效或被替代，不能支持所属期" if not valid_sources else "缺少可核对的原文摘录" if not excerpts else
                                      "缺少支持研究所属期的日期或过渡条款" if not time_supported else "")
             matches[qid] = {**item, "question_id": qid, "question": known_questions[qid],
                             "evidence_ids": list(excerpts), "excerpts": excerpts,
-                            "period_excerpts": period, "sufficient": bool(item.get("sufficient") and excerpts and time_supported),
+                            "period_excerpts": period, "period_status": time_state,
+                            "sufficient": bool(item.get("sufficient") and excerpts and time_supported and valid_sources),
                             "gap": gap}
+        for item in previous.get("coverage", []):
+            qid = item.get("question_id")
+            if item.get("sufficient") and qid in known_questions and item.get("question") == known_questions[qid]:
+                if all(eid in by_id and by_id[eid].get("is_current") is not False and not by_id[eid].get("superseded_by") for eid in item.get("evidence_ids", [])):
+                    matches[qid] = item
         coverage = [matches.get(qid, {"question_id": qid, "question": question, "evidence_ids": [],
                                      "sufficient": False, "gap": "尚未取得能够支持该子问题的资料"})
                     for qid, question in known_questions.items()]
@@ -586,28 +628,41 @@ class ResearchAgent(BaseAgent):
     def report_issues(report, evidence, assessment):
         from services.security import check_answer
         sources = {e["evidence_id"]: {**e, "source_type": "default", "status": "active"} for e in evidence}
-        covered = {item["question"]: set(item["evidence_ids"]) for item in assessment["coverage"] if item["sufficient"]}
-        issues, unmatched, used = [], [], set()
-        if not report["analysis"] or assessment["coverage"][0]["question"] not in {a["question"] for a in report["analysis"]}:
+        questions = assessment.get("coverage", [])
+        covered = {item.get("question_id") or f"q{i}": set(item["evidence_ids"]) for i, item in enumerate(questions, 1) if item["sufficient"]}
+        question_ids = {item["question"]: item.get("question_id") or f"q{i}" for i, item in enumerate(questions, 1)}
+        issues, unmatched, used, details = [], [], set(), []
+        if not report["analysis"]:
             issues.append("unsupported_conclusion")
-        for item in report["analysis"]:
+        resolved = set()
+        for index, item in enumerate(report["analysis"]):
+            qid = item.get("question_id") or question_ids.get(item["question"])
+            if qid:
+                item["question_id"] = qid
+                resolved.add(qid)
             refs = set(item["evidence_ids"])
             if not refs <= sources.keys():
                 issues.append("citation_mismatch")
-            if not refs or not refs <= covered.get(item["question"], set()):
+            if not refs or not refs <= covered.get(qid, set()):
                 issues.append("unsupported_conclusion")
+                details.append({"field": f"analysis[{index}]", "question_id": qid,
+                                "message": "子问题未充分覆盖或引用不属于该题", "allowed_evidence_ids": sorted(covered.get(qid, set()))})
             used.update(refs & sources.keys())
-            _, checks = check_answer(item["finding"], sources=[sources[eid] for eid in sorted(refs & sources.keys())],
-                                     citation_details=True)
+            item["finding"], checks = check_answer(item["finding"], sources=[sources[eid] for eid in sorted(refs & sources.keys())],
+                                     citation_details=True, allow_nonfiling=bool(refs and refs <= covered.get(qid, set())))
             unmatched.extend(checks["unmatched_citations"])
-            issues.extend(checks["issues"])
-        _, checks = check_answer(report["answer_draft"], sources=[sources[eid] for eid in sorted(used)],
-                                 citation_details=True)
+            issues.extend(issue for issue in checks["issues"] if issue != "sensitive_identifier")
+        if questions and (questions[0].get("question_id") or "q1") not in resolved:
+            issues.append("unsupported_conclusion")
+            details.append({"field":"analysis", "message":"缺少核心子问题 q1 的有据分析"})
+        report["answer_draft"], checks = check_answer(report["answer_draft"], sources=[sources[eid] for eid in sorted(used)],
+                                 citation_details=True, allow_nonfiling=bool(used and not issues))
         unmatched.extend(checks["unmatched_citations"])
-        issues.extend(checks["issues"])
+        issues.extend(issue for issue in checks["issues"] if issue != "sensitive_identifier")
         if unmatched:
             issues.append("citation_mismatch")
-        return {"ok": not issues, "issues": list(dict.fromkeys(issues)), "unmatched_citations": list(dict.fromkeys(unmatched))}
+        return {"ok": not issues, "issues": list(dict.fromkeys(issues)), "details": details,
+                "unmatched_citations": list(dict.fromkeys(unmatched))}
 
     async def report(self, data):
         assessment = data.get("assessment") or {"coverage": []}
@@ -624,7 +679,7 @@ class ResearchAgent(BaseAgent):
         evidence = [item for item in data["evidence"] if item["evidence_id"] in ids]
         payload = {k: data.get(k) for k in ("query", "facts", "unknowns", "region", "tax_period", "warnings", "calculations")}
         payload.update(evidence=evidence, coverage=assessment["coverage"])
-        instruction = ("生成可人工复核的初步研究报告。analysis只写有充分初步证据的子问题，question逐字使用coverage的question，"
+        instruction = ("生成可人工复核的初步研究报告。analysis只写有充分初步证据的子问题，question_id使用coverage的稳定ID，question可自然概括，"
                        "每项仅引用该题列出的evidence_id。answer_draft只归纳有依据的分析。未覆盖的问题列在不确定事项。"
                        "先直接回答当前业务。若通用规则有明确例外，先用本案事实判断例外，再给出净结论。"
                        "官方问答的业务金额可能和本案不同，必须按本案输入重新比较，不能沿用示例结论。"
@@ -668,8 +723,10 @@ class ResearchAgent(BaseAgent):
             raise ResearchConflict("审核请求与当前报告版本不一致")
         if answer.get("action") == "revise":
             report = ResearchReport.model_validate(answer["report"]).model_dump()
-            report.update(original_query=data.get("original_query", data["query"]), confirmed_facts=data["facts"], unconfirmed_facts=data["unknowns"])
-            data["report"] = validate_report(report, data["evidence"])
+            report.update(original_query=data.get("original_query", data["query"]), confirmed_facts=data["facts"], unconfirmed_facts=data["unknowns"],
+                          case_references=data.get("report", {}).get("case_references", data.get("case_references", [])))
+            evidence_ids = {eid for item in report["analysis"] for eid in item["evidence_ids"]}
+            data["report"] = validate_report(report, [e for e in data["evidence"] if e["evidence_id"] in evidence_ids])
             data["report_version"] += 1
             data.update(status="awaiting_review", review_action="revise")
             return {"data": data}
@@ -677,7 +734,8 @@ class ResearchAgent(BaseAgent):
             data.update(status="running", review_action="research_again", stop_reason=None,
                         research_rounds=0, replans=0, assessment={}, completed_questions=0,
                         candidates=[], evidence=[], searched_queries=[], read_urls=[], reference_queries=[],
-                        token_upper_spent=0)
+                        token_upper_spent=0, calculations=[], warnings=[], calculation_attempted=False,
+                        assessed_evidence_ids=[], metrics={"llm_calls": [], "tool_calls": []})
             data.pop("report", None)
             data.pop("failure", None)
             if answer.get("reply"):
@@ -702,15 +760,21 @@ class ResearchAgent(BaseAgent):
                         if _run_metrics.get() is not None:
                             data["metrics"] = _run_metrics.get()
                         data["stage"] = _name
+                        data.pop("resume_stage", None)
                         await progress(_name, "")
                         started = time.perf_counter()
                         try:
                             data = await getattr(self, _name)(data)
                         except (ResearchFailure, ResearchBudgetExceeded) as exc:
+                            if _name == "calculate":
+                                data.setdefault("warnings", []).append("可选计算未完成，报告将明确保留计算条件缺口")
+                                return {"data": data}
                             if isinstance(exc, ResearchBudgetExceeded):
                                 exc = ResearchFailure("research_budget_exhausted", str(exc))
                             data.update(status="failed", failure={"code": exc.code, "message": str(exc),
                                                                  "details": exc.details})
+                            if exc.code in ("model_call_failed", "structured_output_invalid"):
+                                data["resume_stage"] = _name
                             data.pop("report", None)
                         data.setdefault("trace", []).append({"stage": _name, "at": utcnow(),
                                                              "elapsed_ms": round((time.perf_counter() - started) * 1000)})
@@ -718,7 +782,7 @@ class ResearchAgent(BaseAgent):
                     graph.add_node(name, node)
                 graph.add_node("review", self.review)
                 graph.add_node("clarify", self.clarify)
-                graph.add_edge(START, "understand")
+                graph.add_conditional_edges(START, lambda state: state["data"].get("resume_stage") or "understand")
                 routes = {"understand": self.after_understand, "prepare_clarification": "clarify",
                           "cases": "plan", "plan": "retrieve", "retrieve": "calculate",
                           "calculate": "assess", "assess": self.after_assess, "supplement": "retrieve",
@@ -729,7 +793,7 @@ class ResearchAgent(BaseAgent):
                             return END
                         return route(state) if callable(route) else route
                     graph.add_conditional_edges(source, next_node)
-                graph.add_edge("clarify", "understand")
+                graph.add_conditional_edges("clarify", lambda state: "cases" if state["data"].get("skip_unknowns") and not state["data"].get("clarification_has_reply") else "understand")
                 graph.add_conditional_edges("review", lambda s: {"confirm": END, "revise": "review", "research_again": "understand"}[s["data"]["review_action"]])
                 self.graph = graph.compile(checkpointer=self.checkpointer)
         return self.graph
@@ -740,7 +804,8 @@ class ResearchAgent(BaseAgent):
     async def execute(self, task_id, revision, *, action=None, emit=None):
         data = self.store.get(task_id)
         lease = self.store.claim(task_id, revision)
-        restart = data["status"] == "failed" or legacy_failed_report(data)
+        resume_failed = data["status"] == "failed" and bool(data.get("resume_stage"))
+        restart = (data["status"] == "failed" and not resume_failed) or legacy_failed_report(data)
         metrics = copy.deepcopy(data.get("metrics", {"llm_calls": [], "tool_calls": []}))
         if restart or (action or {}).get("action") == "research_again":
             metrics = {"llm_calls": [], "tool_calls": []}
@@ -784,6 +849,11 @@ class ResearchAgent(BaseAgent):
                 command = Command(resume=action)
             elif data["status"] == "finalized":
                 raise ResearchConflict("任务已定稿")
+            elif resume_failed:
+                resumed = copy.deepcopy(data)
+                resumed.update(status="running", metrics=metrics)
+                resumed.pop("failure", None)
+                command = {"data": resumed}
             elif restart or not snapshot.values:
                 keys = ("task_id", "owner_id", "query", "original_query", "web_search", "use_cases",
                         "created_at", "report_version", "trace", "budget", "evaluation_run",

@@ -40,7 +40,7 @@ def collect_answer_sources(records: list[dict]) -> list[dict]:
     return visible
 
 
-def check_answer(text: str, sources: list[dict] | None = None, *, citation_details=False) -> tuple[str, dict]:
+def check_answer(text: str, sources: list[dict] | None = None, *, citation_details=False, allow_nonfiling=False) -> tuple[str, dict]:
     """确定性输出检查：资料内文号/条款匹配、敏感标识脱敏、明显危险建议拦截。
 
     匹配只证明本轮可见资料有该引用，不证明法规全球存在或现行有效。
@@ -75,6 +75,8 @@ def check_answer(text: str, sources: list[dict] | None = None, *, citation_detai
     # 否定/风险说明保留；明确建议做违法动作或保证法律结论时拒绝发布整份草稿。
     risky = False
     for match in re.finditer(r"虚开(?:增值税)?发票|隐瞒收入|少报收入|做两套账|无需申报|保证免税|绝对合法|保证(?:不会|不被)(?:查|追究)", text):
+        if allow_nonfiling and match.group() == "无需申报":
+            continue
         before = text[max(0, match.start()-10):match.start()]
         after = text[match.end():match.end()+10]
         negated = bool(re.search(r"(?:不能|不得|不要|禁止|严禁|切勿|避免|不建议|不应|拒绝|不可以|无法|不代表|没有依据)(?:再|去|通过|直接|随意|擅自|采取|进行|建议|保证|认定|认为|该方案|这个方案|此方案|的|是|为|\s){0,4}$", before)

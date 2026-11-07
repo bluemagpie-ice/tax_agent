@@ -104,7 +104,7 @@ def test_fact_skip_review_edit_and_stale_version(tmp_path):
             store = ResearchStore(create_engine(f"sqlite:///{tmp_path / 'facts.sqlite'}"))
             task = store.create("模拟业务研究")
             async with AsyncSqliteSaver.from_conn_string(str(tmp_path / 'facts-graph.sqlite')) as saver:
-                agent = ResearchAgent(store, llm=ScriptedModel([understanding(), understanding(), covered(), report()]),
+                agent = ResearchAgent(store, llm=ScriptedModel([understanding(), covered(), report()]),
                                       search=lambda *a, **k: [POLICY], workdir_root=tmp_path)
                 agent._checkpointer = saver
                 task = await agent.execute(task['task_id'], task['revision'])
@@ -228,7 +228,8 @@ def test_dated_core_evidence_rejects_old_policy_and_ignores_unrelated_candidates
     async def verify():
         store = ResearchStore(create_engine(f"sqlite:///{tmp_path / 'old-policy.sqlite'}"))
         content = "本模拟办法自2023年1月1日起施行。模拟业务规则仅用于测试。"
-        old = {**POLICY, "content": content}
+        # A start in 2023 alone does not prove expiry in 2026. Test known expiry.
+        old = {**POLICY, "content": content, "is_current": False}
         eid = normalize_evidence(old)["evidence_id"]
         assessment = {"coverage": [{"question_id":"q1", "evidence_ids":[eid], "sufficient":True,
                                     "excerpts":{eid:content}, "period_excerpts":{eid:content}}]}

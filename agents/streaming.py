@@ -78,7 +78,7 @@ def count_tokens(text, model_name=""):
     return math.ceil(len(encoding.encode(str(text), disallowed_special=())) * margin), method
 
 
-def prepare_context(llm, messages):
+def prepare_context(llm, messages, *, window=None, output_reserve=None):
     """请求前裁剪完整消息组；固定系统约束/当前问题，工具调用与回执不能拆散。"""
     from langchain_core.messages import convert_to_messages, HumanMessage, SystemMessage, ToolMessage
     if isinstance(messages, str):
@@ -88,8 +88,8 @@ def prepare_context(llm, messages):
     core = getattr(llm, "bound", llm)
     name = getattr(core, "model_name", "")
     name = name if isinstance(name, str) else ""
-    window = int(os.getenv("LLM_CONTEXT_WINDOW", "8192"))
-    reserve = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1536"))
+    window = int(window if window is not None else os.getenv("LLM_CONTEXT_WINDOW", "8192"))
+    reserve = int(output_reserve if output_reserve is not None else os.getenv("LLM_MAX_OUTPUT_TOKENS", "1536"))
     warning_ratio = float(os.getenv("LLM_CONTEXT_WARN_RATIO", "0.8"))
     if window < 512 or reserve < 64 or reserve >= window or not 0 < warning_ratio <= 1:
         raise ValueError("上下文配置无效：窗口至少512、输出预算至少64且小于窗口，预警比例需在(0,1]内")

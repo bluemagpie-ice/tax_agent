@@ -60,11 +60,11 @@
 | P1-12 | P1 | 已确认并修复 | web/templates/index.html; tests/test_conversation_ui.js | 401 不切身份或 Token；会话存储按角色；独立访问凭证恢复按钮 | 需真实浏览器验收 |
 | P1-2 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
 | P1-3 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
-| P1-4 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
-| P1-5 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
-| P1-6 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
-| P1-7 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
-| P1-8 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
+| P1-4 | P1 | 已确认但暂未修复 | agents/research_agent.py | Research 入选优先关联题目及分数；普通聊天 RAG 日期排序待阶段4 | 尚未消除全链路风险 |
+| P1-5 | P1 | 已确认并修复 | services/policy_validity.py; agents/research_agent.py | 期间区间判断，起始无终止标待核对；文号年份不通过 | 不做法律效力自动保证；区间解析只覆盖显式年份/日期 |
+| P1-6 | P1 | 已确认并修复 | agents/research_agent.py; agents/streaming.py | 相关度排序、选集变更才评估、保留已充分题目、裁剪警告、Research 独立窗口环境变量 | 真实模型相关度与小窗口验收待执行 |
+| P1-7 | P1 | 已确认并修复 | agents/research_agent.py; services/security.py | 预留报告与一次修正调用及token；按question_id；具体错误；敏感字段脱敏；有据非申报分析不误拦 | 联合文号及全报告字段脱敏还需专项覆盖 |
+| P1-8 | P1 | 已确认并修复 | agents/research_agent.py; web/static/research.js | 瞬时模型/结构失败保留状态从失败节点恢复；其他失败明确从头执行 | 预算耗尽须重新研究；取消的线程调用不能强杀 |
 | P1-9 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
 | RAG-001 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | RAG-002 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
@@ -93,15 +93,15 @@
 | RES-006 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | RES-007 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | RES-008 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| RES-009 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| RES-010 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| RES-011 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| RES-009 | P2/P3（依报告） | 已确认并修复 | agents/research_agent.py | unknown_kinds分类，补充事实累加，无补充skip不重复调用understand | 模型事实分类仍需真实验收 |
+| RES-010 | P2/P3（依报告） | 已确认并修复 | agents/research_agent.py | 可选计算失败降级警告；重新研究清理旧计算和告警 | 纯计算工具异常降级还需扩展 |
+| RES-011 | P2/P3（依报告） | 已确认并修复 | agents/research_agent.py | 修改报告保留case_references，只绑定报告引用的政策证据 | 人工改稿需人工承担事实审核 |
 | RES-012 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| RES-013 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| RES-014 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| RES-015 | P3 | 待运行验证 | — | 尚未完成 | 未消除 |
+| RES-013 | P2/P3（依报告） | 已确认并修复 | agents/research_agent.py | 本地检索优先且网页预算留出本地检索次数 | 极小总预算仍不能完成所有工具 |
+| RES-014 | P2/P3（依报告） | 已确认但暂未修复 | web/static/research.js | 已修运行计时、真实阶段与心跳状态；SQLite线程池/摘要查询优化待做 | 同步DB在事件循环及线程池竞争仍存在 |
+| RES-015 | P3 | 已确认并修复 | web/static/research.js; tests/test_research_ui.js | SSE error/停止刷新，running显示中文阶段 | 真实浏览器断线/停止待验收 |
 | RES-016 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| RES-017 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| RES-017 | P2/P3（依报告） | 已确认但暂未修复 | agents/research_agent.py | 计划重复编号与未知依赖规范化，结构错误带字段反馈 | 超长模型列表尚无裁剪降级 |
 | RES-018 | P3 | 待运行验证 | — | 尚未完成 | 未消除 |
 | TEST-1 | P2/P3（依报告） | 已确认并修复 | tests/conftest.py; services/paths.py; database/models.py | collection 前隔离；每测试替换并恢复 engine；禁止外网；阶段1回归 56 passed | live 测试仍需独立环境 |
 | TEST-2 | P2/P3（依报告） | 已确认并修复 | tests/conftest.py; tests/test_*.py | 删除导入时 chdir；隔离默认配置、上传和 checkpoint 路径；阶段1回归 56 passed | 少数显式传参由测试自行隔离 |
@@ -145,3 +145,11 @@ P0-2/3/4 已确认代码问题；修改完成，正在运行隔离回归。旧�
 本地开发：设置不同的 AUTH_USER_TOKEN 与 DEVELOPER_TOKEN（或 AUTH_ADMIN_TOKEN），首页设置中“验证并应用访问 Token”；本地服务在 TAX_AGENT_MODEL_ALLOWED_ORIGINS 指定完整 origin。未更改真实 .env/config.json。
 
 阶段 1 checkpoint：c9daecb。
+
+### 阶段 3（核心路径完成，性能与边界项仍有遗留）
+
+`test_audit_research.py test_research.py test_research_metadata.py test_research_cases.py test_research_eval.py test_agent_safety.py`：44 passed。随后 Research/上下文定向36 passed。Node Research DOM脚本通过，新增碎片SSE、keepalive、error后刷新、42秒计时和恢复按钮断言。全部为脚本模型/Mock与临时SQLite，无真实税务结论或模型验收。包含充分/不足证据、期间不确定、超时恢复、错误引用修正、预算不足与取消的既有及新增回归。
+
+旧测试把“2023起施行就不适用2026”当作预期，已改为明确 is_current=False 的失效证据，并新增开放起始期间 pending_verification 回归。
+
+阶段2 checkpoint：e7b4ac7。RESEARCH_CONTEXT_WINDOW / RESEARCH_MAX_OUTPUT_TOKENS 可独立设置，默认沿用聊天预算；不擅自放大真实模型上下文。

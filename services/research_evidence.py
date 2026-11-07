@@ -61,7 +61,8 @@ def source_version(evidence):
 
 def restore_policy_metadata(records):
     """Fill fields missing from old chunks using an exact tracker file ID match."""
-    path = Path(__file__).resolve().parents[1] / "data" / "policy_tracker.sqlite3"
+    from services.paths import DATA_DIR
+    path = DATA_DIR / "policy_tracker.sqlite3"
     ids = {record.get("file_id") for record in records} - {None, ""}
     if not ids or not path.is_file():
         return
@@ -83,7 +84,7 @@ def restore_policy_metadata(records):
 def compact_evidence(evidence, focus=""):
     """Keep short source-bound excerpts so several policies fit one model call."""
     keys = ("evidence_id", "title", "source_url", "document_number", "publish_date", "document_date", "response_date", "effective_date",
-            "expiry_date", "region", "source_check")
+            "expiry_date", "region", "source_check", "is_current", "superseded_by", "validity_check", "source_type")
 
     def bigrams(value):
         return {pair for word in re.findall(r"[\u4e00-\u9fff]+", value) for pair in zip(word, word[1:])}

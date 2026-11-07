@@ -56,5 +56,22 @@ const findButton=text=>get('research-result').querySelectorAll('button').find(b=
     assert.deepEqual(calls.filter(c=>c.url==='/api/research/cases/case').map(c=>c.body.action),['consent','publish']);
     listeners['tax-auth-changed']();assert.equal(get('research-result').children.length,0);
     assert.equal(get('research-query').value,'');
+    const normalFetch=context.fetch;
+    let refreshed=false;
+    context.fetch=async(url,options)=>{
+        if(url.endsWith('/stream')) {
+            const bytes=new TextEncoder().encode('data: '+JSON.stringify({type:'status',status:'running',stage:'assess',elapsed_ms:42000})+'\n\n: keepalive\n\ndata: '+JSON.stringify({type:'error',message:'模拟SSE失败'})+'\n\n');
+            let delivered=false;
+            return {ok:true,body:{getReader:()=>({read:async()=>delivered ? {done:true}:(delivered=true,{done:false,value:bytes})})}};
+        }
+        if(url==='/api/research/tasks/test-task') {refreshed=true; return response({...current,status:'failed',stage:'assess',elapsed_ms:42000,resume_stage:'assess'});}
+        return normalFetch(url,options);
+    };
+    get('research-query').value='SSE故障';get('research-form').onsubmit({preventDefault(){}});await settle();
+    assert(refreshed,'SSE error must refresh persisted task');
+    assert.match(get('research-error').textContent,/模拟SSE失败/);
+    assert.match(get('research-status').textContent,/42 秒/);
+    assert.equal(get('research-run').textContent,'从已保存步骤恢复');
+    context.fetch=normalFetch;
     console.log('PASS: Research mode isolation, validation, fragmented SSE, version confirmation, preview-before-save, consent/publication and identity reset (DOM substitutes)');
 })().catch(error=>{console.error(error);process.exitCode=1;});
