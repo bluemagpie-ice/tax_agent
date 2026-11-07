@@ -3,8 +3,77 @@ pytest 共用 fixtures 和 mock 工具
 =================================
 """
 import sys
+import os
+import uuid
+from pathlib import Path
 import pytest
 from unittest.mock import patch, MagicMock
+
+# Establish isolation before test-module collection imports any application code.
+_TEST_ROOT = Path(__file__).resolve().parents[1] / ".test_runs" / ("state-" + uuid.uuid4().hex)
+_TEST_ROOT.mkdir(parents=True)
+os.environ["PYTHON_DOTENV_DISABLED"] = "1"
+os.environ["DATABASE_URL"] = "sqlite:///" + (_TEST_ROOT / "business.db").as_posix()
+os.environ["TAX_AGENT_DATA_DIR"] = str(_TEST_ROOT / "data")
+os.environ["TAX_AGENT_UPLOAD_DIR"] = str(_TEST_ROOT / "uploads")
+os.environ["AUTH_USER_TOKEN"] = "test_token_123"
+os.environ["AUTH_ADMIN_TOKEN"] = "admin_token_456"
+for _key in ("LLM_API_KEY", "EMBEDDING_API_KEY", "QDRANT_API_KEY", "QDRANT_CLUSTER_URL"):
+    os.environ[_key] = ""
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if item.path.name == "test_api_connectivity.py" or "test_rag_end_to_end" in item.nodeid:
+            item.add_marker(pytest.mark.live)
+        if item.get_closest_marker("live"):
+            item.add_marker(pytest.mark.skip(reason="真实 API 测试单独执行，默认禁止付费调用与生产 Qdrant 写入"))
+
+
+@pytest.fixture(autouse=True)
+def isolate_runtime(tmp_path, monkeypatch):
+    import socket
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    import services.config_manager as config
+    import database.models as models
+    import database.repositories as repositories
+    import database.init_db as init_db
+    import agents.base_agent as base
+    import agents.memory as memory
+
+    engine = create_engine("sqlite:///" + (tmp_path / "business.db").as_posix(),
+                           connect_args={"check_same_thread": False})
+    sessions = sessionmaker(bind=engine)
+    for module in (models, repositories, init_db):
+        if hasattr(module, "engine"):
+            monkeypatch.setattr(module, "engine", engine)
+        monkeypatch.setattr(module, "SessionLocal", sessions)
+    monkeypatch.setattr(models, "DATABASE_URL", str(engine.url))
+    models.create_tables()
+    monkeypatch.setattr(config, "_CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config, "_CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(base, "_CHECKPOINT_DB_PATH", tmp_path / "checkpoints.sqlite")
+    monkeypatch.setattr(base, "_conversation_memory", None)
+    monkeypatch.setattr(base.BaseAgent, "base_workdir", str(tmp_path / "agents"))
+    monkeypatch.setattr(memory, "DATA_DIR", tmp_path)
+    original_connect = socket.socket.connect
+    def reject_network(sock, address):
+        # Windows asyncio implements its self-pipe with a loopback socketpair.
+        import inspect
+        caller = inspect.currentframe().f_back
+        if caller.f_code.co_name == "_fallback_socketpair" and caller.f_globals.get("__name__") == "socket":
+            return original_connect(sock, address)
+        raise OSError("测试禁止外部网络；请使用 Mock 或独立 live 验证")
+    monkeypatch.setattr(socket.socket, "connect", reject_network)
+    monkeypatch.setattr(socket.socket, "connect_ex", reject_network)
+    yield
+    # Legacy helpers replace module globals directly; monkeypatch restores originals.
+    for module in (models, repositories, init_db):
+        replacement = getattr(module, "engine", engine)
+        if replacement is not engine:
+            replacement.dispose()
+    engine.dispose()
 
 # ============================================================
 # Mock EmbeddingService — 给税法检索 Tool 用

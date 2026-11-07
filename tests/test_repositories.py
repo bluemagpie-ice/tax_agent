@@ -22,7 +22,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-os.chdir(str(PROJECT_ROOT))
+
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker

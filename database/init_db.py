@@ -108,6 +108,7 @@ def insert_initial_data():
         else:
             logger.info("示例用户记忆已存在，跳过")
 
+        return True
     except Exception as e:
         logger.error(f"插入初始化数据失败：{e}")
         return False

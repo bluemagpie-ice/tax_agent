@@ -26,7 +26,7 @@ from pathlib import Path
 # ---------- 关键：让 tests/ 目录下执行时能正确 import 项目根包 ----------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-os.chdir(str(PROJECT_ROOT))  # 切到项目根目录，让相对路径 sqlite:///./tax_agent.db 能工作
+
 
 def _build_memory_engine():
     """
@@ -215,148 +215,26 @@ def test_idempotent_insert():
 # 测试 5：真实数据库文件 init_db 跑一遍
 # ================================================================
 def test_real_init_db():
-    """
-    完整调试版：用内存数据库跑 init_db.init_database()
-    并逐步手动插入数据，精确定位哪一步报错。
-    """
-    import database.init_db as init_db_module
-    import database.models as models_module
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-
-    # ====== 保存旧引用 ======
-    old_models_engine = models_module.engine
-    old_models_session = models_module.SessionLocal
-    old_initdb_engine = init_db_module.engine
-    old_initdb_session = init_db_module.SessionLocal
-
-    # ====== 构建内存数据库 ======
-    new_engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-    )
-    new_session_local = sessionmaker(bind=new_engine)
-
-    # ====== 同时替换两处 engine ======
-    old_models_engine.dispose()
-
-    models_module.engine = new_engine
-    models_module.SessionLocal = new_session_local
-    models_module.DATABASE_URL = "sqlite:///:memory:"
-    init_db_module.engine = new_engine
-    init_db_module.SessionLocal = new_session_local
-
+    """Run the actual initializer twice against an isolated in-memory database."""
+    from unittest.mock import patch
+    import database.init_db as init_module
+    from database.models import Base, User, Messages
+    engine, sessions = _build_memory_engine()
     try:
-        # ====== 第一步：确认 create_tables 正常 ======
-        ok = init_db_module.create_tables()
-        assert ok, "❌ create_tables() 返回了 False"
-        print(f"  ✅ create_tables() 成功")
-
-        # ====== 第二步：手动逐步插入，精确定位 ======
-        print(f"\n  🔍 逐步手动插入测试（看哪一步挂）：")
-        from datetime import datetime as _dt
-        from database.models import User, KnowledgeBases, Conversation, Messages, UserMemories
-
-        s = new_session_local()
-        try:
-            # 步骤 1: User
-            print(f"    [1/5] User...", end=" ", flush=True)
-            if s.query(User).filter_by(username="text_user").first() is None:
-                u = User(username="text_user", create_at=_dt.now())
-                s.add(u); s.commit()
-                s.refresh(u)
-                print(f"✅ id={u.id}")
-            else:
-                print("已存在")
-
-            # 步骤 2: KnowledgeBases
-            print(f"    [2/5] KnowledgeBases...", end=" ", flush=True)
-            if s.query(KnowledgeBases).filter_by(name="税务知识库").first() is None:
-                kb = KnowledgeBases(
-                    name="税务知识库", kb_type="qdrant",
-                    created_by="text_user",
-                    share_config='{"access_level": "global", "department_ids": [], "user_uids": []}',
-                    create_at=_dt.now(),
-                )
-                s.add(kb); s.commit()
-                print(f"✅ id={kb.id}")
-            else:
-                print("已存在")
-
-            # 步骤 3: Conversation
-            print(f"    [3/5] Conversation...", end=" ", flush=True)
-            conv = Conversation(user_id=1, create_at=_dt.now())
-            s.add(conv); s.commit()
-            s.refresh(conv)
-            print(f"✅ id={conv.id}")
-
-            # 步骤 4: Messages
-            print(f"    [4/5] Messages...", end=" ", flush=True)
-            s.add_all([
-                Messages(conversation_id=conv.id, role="user",
-                         content="你好，我想咨询一下税额的计算公式", create_at=_dt.now()),
-                Messages(conversation_id=conv.id, role="agent",
-                         content="您好。税额 = 不含税价格 × 税率", create_at=_dt.now()),
-            ])
-            s.commit()
-            print(f"✅ 2 条")
-
-            # 步骤 5: UserMemories
-            print(f"    [5/5] UserMemories...", end=" ", flush=True)
-            if s.query(UserMemories).first() is None:
-                s.add(UserMemories(user_id=1,
-                        content="用户咨询过税额的计算公式", create_at=_dt.now()))
-                s.commit()
-            print(f"✅")
-
-            print(f"\n  🎉 手动插入全部成功！说明数据逻辑没问题。")
-            print(f"  🔍 现在测试 insert_initial_data() 为啥失败...")
-
-        except Exception as e:
-            print(f"\n  ❌ 手动插入也失败了！真实报错：")
-            import traceback
-            traceback.print_exc()
-            return  # 直接跳过后续
-
-        finally:
-            s.close()
-
-        # ====== 第三步：清空，再跑正式 insert_initial_data ======
-        print(f"\n  🔍 清空数据，测试正式的 insert_initial_data()：")
-        s2 = new_session_local()
-        try:
-            # 先确认 init_db_module.insert_initial_data 用的是我们的 engine
-            print(f"    init_db.SessionLocal is new_session_local: {init_db_module.SessionLocal is new_session_local}")
-            print(f"    models.SessionLocal is new_session_local: {models_module.SessionLocal is new_session_local}")
-
-            ret = init_db_module.insert_initial_data()
-            print(f"    insert_initial_data() 返回: {ret}")
-
-            if ret is not None and ret is not False:
-                print(f"  🔍 返回的是字符串，说明有错误信息: {ret}")
-        finally:
-            s2.close()
-
+        with patch.object(init_module, "engine", engine), patch.object(init_module, "SessionLocal", sessions):
+            assert init_module.create_tables() is True
+            assert init_module.insert_initial_data() is True
+            assert init_module.insert_initial_data() is True
+            with sessions() as session:
+                assert session.query(User).count() == 1
+                assert session.query(Messages).count() == 2
     finally:
-        # ====== 恢复旧 engine ======
-        new_engine.dispose()
-        models_module.engine = old_models_engine
-        models_module.SessionLocal = old_models_session
-        init_db_module.engine = old_initdb_engine
-        init_db_module.SessionLocal = old_initdb_session
+        engine.dispose()
+
 # ================================================================
 # 运行全部测试
 # ================================================================
 if __name__ == "__main__":
-    # ---------- 自动清理：测试开始前删残留的 tax_agent.db ----------
-    project_db = PROJECT_ROOT / "tax_agent.db"
-    if project_db.exists():
-        try:
-            project_db.unlink()
-            print(f"🧹 已清理残留的 {project_db.name}")
-        except PermissionError:
-            print(f"⚠️  无法删除 {project_db.name}（可能被其他进程占用）")
-
     print("\n" + "=" * 60)
     print("T1 — 数据库初始化测试")
     print("=" * 60)
@@ -382,14 +260,6 @@ if __name__ == "__main__":
             print(f"  ❌ 失败: {e}")
             import traceback
             traceback.print_exc()
-
-    # ---------- 自动清理：测试结束后确保 tax_agent.db 不存在 ----------
-    if project_db.exists():
-        try:
-            project_db.unlink()
-            print(f"\n🧹 测试结束，再次清理 {project_db.name}")
-        except PermissionError:
-            pass  # 最后一次清理，删不掉就算了
 
     print(f"\n{'=' * 60}")
     print(f"测试结果: ✅ {passed} passed | ❌ {failed} failed")

@@ -120,7 +120,8 @@ class Messages(Base):
         return f"Messages(id={self.id}, role={self.role})"
 
 # ========数据库连接与操作配置=========
-DATABASE_URL = os.getenv("DATABASE_URL") or "sqlite:///./tax_agent.db"
+from services.paths import PROJECT_ROOT
+DATABASE_URL = os.getenv("DATABASE_URL") or f"sqlite:///{(PROJECT_ROOT / 'tax_agent.db').as_posix()}"
 
 # 创建数据库引擎
 engine = create_engine(

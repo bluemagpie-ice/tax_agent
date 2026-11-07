@@ -151,7 +151,8 @@ class QdrantKnowledgeBase(KnowledgeBase):
 
     def __init__(self, work_dir: str, kb_id: Optional[str] = None):
         super().__init__(work_dir=work_dir, kb_id=kb_id or "user_documents")
-        self.upload_root = Path(__file__).resolve().parent.parent / "uploads"
+        from services.paths import UPLOAD_DIR
+        self.upload_root = UPLOAD_DIR
         self._embedding_lock = threading.Lock()
         if self.kb_id == "user_documents" and not self._metadata.get("legacy_imported"):
             existing = {f["file_id"]: f for f in self._metadata.get("files", [])}

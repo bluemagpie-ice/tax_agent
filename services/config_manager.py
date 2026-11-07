@@ -26,7 +26,8 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 # config.json 文件路径
-_CONFIG_DIR = Path(__file__).resolve().parent.parent / "data"
+from services.paths import DATA_DIR
+_CONFIG_DIR = DATA_DIR
 _CONFIG_FILE = _CONFIG_DIR / "config.json"
 _CONFIG_LOCK = threading.RLock()
 MODEL_PROVIDERS = {

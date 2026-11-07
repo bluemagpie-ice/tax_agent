@@ -94,8 +94,9 @@ class TestCompress:
 
             session = memory.get_session(SESSION)
 
-        # 压缩后 messages 只保留最近 retain_recent=2 条
-        assert len(session["messages"]) == 2
+        # Compression only advances the prompt window; display history is durable.
+        assert len(session["messages"]) == 6
+        assert session["compressed_count"] == 4
         # 旧消息被压缩进 summary 或 episodes
         assert session["summary"], "摘要不应为空"
         assert len(session["episodes"]) >= 1, "至少生成了一个 episode"

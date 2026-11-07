@@ -28,6 +28,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 from services.record_store import SQLiteRecordStore
 from services.security import current_tenant_id, record_visible
+from services.paths import DATA_DIR
 
 class ConversationMemory:
     """
@@ -57,7 +58,7 @@ class ConversationMemory:
         context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET,
         title_llm=None,
     ) -> None:
-        self.base_dir = Path(base_dir) if base_dir else _PROJECT_ROOT / "data" / "conversation_memory"
+        self.base_dir = Path(base_dir) if base_dir else DATA_DIR / "conversation_memory"
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.compress_at = max(4, int(compress_at))
         self.retain_recent = max(2, int(retain_recent))
@@ -70,7 +71,8 @@ class ConversationMemory:
     def context_for(self, session_id: str, message: str) -> Dict[str, Any]:
         """组装供 LLM 使用的完整上下文包（含历史、画像、相关片段、最近对话）。"""
         session = self.get_session(session_id) or self._empty(session_id)
-        context_messages = [m for m in session.get("messages", []) if not m.get("exclude_from_context") and not m.get("pending")]
+        context_messages = [m for m in session.get("messages", [])[session.get("compressed_count", 0):]
+                            if not m.get("exclude_from_context") and not m.get("pending")]
         related = self._related(context_messages, message)
 
         profile = self._load_user_profile() or session.get("profile", {})
@@ -108,7 +110,7 @@ class ConversationMemory:
                 "cache_stable_prefix": True,
             },
             "memory_layers": {
-                "working": len(session.get("messages", [])), # 工作记忆（最近消息数）
+                "working": len(context_messages),
                 "episodic": len(session.get("episodes", [])),
                 "profile_fields": len(session.get("profile", {})),
             },
@@ -150,7 +152,7 @@ class ConversationMemory:
             if not session.get("title"):
                 session["title"] = self._generate_title(user_message)
             # 自动压缩消息（18条）
-            if len(session["messages"]) >= self.compress_at:
+            if len(session["messages"]) - session.get("compressed_count", 0) >= self.compress_at:
                 self._compress(session)
             self._write(session)
             return self._summary(session)
@@ -187,6 +189,7 @@ class ConversationMemory:
         removed = self.store.delete("conversation_session", session_id)
         if path.exists():
             path.unlink()
+        self._rebuild_user_profile()
         return removed
 
     def rename_session(self, session_id: str, title: str) -> bool:
@@ -232,10 +235,18 @@ class ConversationMemory:
             if revision is not None and revision != session.get("_storage_version"):
                 raise RecordConflictError("会话已更新")
             session["messages"] = session["messages"][:-2]
+            # A withdrawn turn must disappear from summaries and derived profiles too.
+            session["summary"] = ""
+            session["episodes"] = []
+            session["compressed_count"] = 0
+            session["profile"] = self._profile_from_messages(session["messages"])
+            if len(session["messages"]) >= self.compress_at:
+                self._compress(session)
             session["turns"] = max(0, int(session.get("turns", 1)) - 1)
             session["updated_at"] = datetime.now().isoformat()
             session["history_retracted"] = True
             self._write(session)
+            self._rebuild_user_profile()
             return session
 
     def ensure_session(self, session_id: str, first_query: str) -> bool:
@@ -290,6 +301,20 @@ class ConversationMemory:
         }
 
     # ------------------------------------------------------------------ 跨会话用户画像
+    def _profile_from_messages(self, messages: list) -> dict:
+        profile = {}
+        for message in messages:
+            if message.get("role") == "user" and not message.get("pending"):
+                profile = self._update_profile(profile, message.get("content", ""), {})
+        return profile
+
+    def _rebuild_user_profile(self) -> None:
+        profile = {}
+        for session in self.store.list("conversation_session", limit=100000):
+            for key in ("taxpayer_types", "tax_years", "topics", "systems"):
+                profile[key] = sorted(set(profile.get(key, [])) | set(session.get("profile", {}).get(key, [])))
+        self._save_user_profile(profile)
+
     def _load_user_profile(self) -> Dict[str, Any]:
         """读取当前租户的跨会话用户画像（不存在返回空）。"""
         try:
@@ -323,7 +348,9 @@ class ConversationMemory:
 
     def _compress(self, session: Dict[str, Any]) -> None:
         """将超出窗口的历史消息压缩成摘要，保留最近 N 条。"""
-        archived = [m for m in session["messages"][:-self.retain_recent] if not m.get("exclude_from_context")]
+        end = max(0, len(session["messages"]) - self.retain_recent)
+        archived = [m for m in session["messages"][session.get("compressed_count", 0):end]
+                    if not m.get("exclude_from_context") and not m.get("pending")]
         if not archived:
             return
         user_points = [item["content"] for item in archived if item.get("role") == "user"][-5:]
@@ -348,7 +375,8 @@ class ConversationMemory:
             }
         )
         session["episodes"] = session["episodes"][-20:]
-        session["messages"] = session["messages"][-self.retain_recent:]
+        # Keep the append-only display history. Only the LLM window advances.
+        session["compressed_count"] = end
 
     # ------------------------------------------------------------------ 画像更新（税务场景）
     # 画像更新（税务场景）
@@ -372,7 +400,7 @@ class ConversationMemory:
 
         # 2) 年份识别（如 "2024 年"、"23年"）
         tax_years = set(updated.get("tax_years", []))
-        for y in re.findall(r"(20\d{2})\s*年?|[0-9]{2}\s*年", message):
+        for y in re.findall(r"(?<!\d)20\d{2}(?!\d)", message):
             tax_years.add(y)
 
         # 3) 税务话题（替换原 IT 运维关键词）
@@ -474,7 +502,8 @@ class ConversationMemory:
             "session_id": session.get("session_id"),
             "title": session.get("title", ""),
             "turns": session.get("turns", 0),
-            "working_messages": len(session.get("messages", [])),
+            "working_messages": len(session.get("messages", [])) - session.get("compressed_count", 0),
+            "history_messages": len(session.get("messages", [])),
             "episodes": len(session.get("episodes", [])),
             "profile": session.get("profile", {}),
             "summary": session.get("summary", ""),

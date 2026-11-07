@@ -36,7 +36,8 @@ except ImportError:
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # SQLite checkpoint 文件路径（每个 Agent 实例首次调用 stream/invoke 时用 aiosqlite 连接）
-_CHECKPOINT_DB_PATH = _PROJECT_ROOT / "data" / "checkpoints.sqlite"
+from services.paths import DATA_DIR
+_CHECKPOINT_DB_PATH = DATA_DIR / "checkpoints.sqlite"
 
 # 长记忆模块（ConversationMemory）—— 懒加载单例，跨 Agent 共享
 _conversation_memory: Optional["ConversationMemory"] = None

@@ -21,6 +21,7 @@ from typing import List, Optional, Tuple
 
 from openai import OpenAI
 from dotenv import load_dotenv
+from services.paths import DATA_DIR
 from services.config_manager import ConfigManager
 from services.cache_utils import TTLCache
 from services.security import current_tenant_id, document_session, document_visible, blocked_document_ids
@@ -701,7 +702,7 @@ class PersistentDocumentStore:
     _lock = threading.Lock()
 
     # 默认持久化文件路径：<项目根>/data/document_store.json
-    _DEFAULT_FILE = Path(__file__).resolve().parent.parent / "data" / "document_store.json"
+    _DEFAULT_FILE = DATA_DIR / "document_store.json"
 
     def __init__(self, file_path: str | Path | None = None):
         # 文件路径只在首次实例化时设置（类级别共享）

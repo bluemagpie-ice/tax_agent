@@ -12,7 +12,7 @@ from eval.research_analysis import summarize
 def test_paired_exports_keep_missing_usage_and_quality_unscored(tmp_path,monkeypatch):
     monkeypatch.setattr('agents.streaming.count_tokens',lambda text,name='':(len(str(text)), 'test_estimate'))
     root = Path(__file__).resolve().parents[1] / 'eval' / 'research'
-    config = json.loads((root / 'config.json').read_text(encoding='utf-8'))
+    config = json.loads((root / 'config.example.json').read_text(encoding='utf-8'))
     config.update(_base=str(root),repeats=2)
     out = asyncio.run(run_experiments(config,smoke=True,limit=1,output=tmp_path))
     rows = list(csv.DictReader((out / 'runs.csv').open(encoding='utf-8-sig')))
@@ -32,7 +32,7 @@ def test_paired_exports_keep_missing_usage_and_quality_unscored(tmp_path,monkeyp
 
 def test_unverified_dataset_cannot_silently_become_formal_eval(tmp_path):
     root = Path(__file__).resolve().parents[1] / 'eval' / 'research'
-    config = json.loads((root / 'config.json').read_text(encoding='utf-8'))
+    config = json.loads((root / 'config.example.json').read_text(encoding='utf-8'))
     config['_base'] = str(root)
     with pytest.raises(ValueError,match='人工核验'):
         asyncio.run(run_experiments(config,output=tmp_path))

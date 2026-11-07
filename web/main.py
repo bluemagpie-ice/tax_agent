@@ -71,11 +71,12 @@ from services.config_manager import ConfigManager, MODEL_PROVIDERS, validate_api
 
 logger = logging.getLogger(__name__)
 
+from services.paths import DATA_DIR, UPLOAD_DIR
 BASE_DIR = Path(__file__).resolve().parent.parent
 PATHS = {
     "templates": str(Path(__file__).resolve().parent / "templates"),
-    "uploads": str(BASE_DIR / "uploads"),
-    "data": str(BASE_DIR / "data"),
+    "uploads": str(UPLOAD_DIR),
+    "data": str(DATA_DIR),
 }
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 os.makedirs(PATHS["uploads"], exist_ok=True)
@@ -115,7 +116,7 @@ async def lifespan(app: FastAPI):
 
     # ---- 知识库管理器（多知识库 + 权限过滤） ----
     from knowledge.kb_manager import KnowledgeBaseManager
-    app.state.kb_manager = KnowledgeBaseManager(work_dir=str(BASE_DIR / "data" / "kb"))
+    app.state.kb_manager = KnowledgeBaseManager(work_dir=str(DATA_DIR / "kb"))
 
     # —— 预置默认知识库自动入库（knowledge/presets/ 目录下的 .md 文件） ——
     presets_dir = BASE_DIR / "knowledge" / "presets"
@@ -145,12 +146,12 @@ async def lifespan(app: FastAPI):
     from knowledge.policy_updater import (
         PolicyUpdater, LocalDirectorySource, logging_notify_hook, TaxGovCnSource,
     )
-    policies_dir = str(BASE_DIR / "data" / "policies")
+    policies_dir = str(DATA_DIR / "policies")
     os.makedirs(policies_dir, exist_ok=True)
 
     policy_updater = PolicyUpdater(
-        tracker_db=str(BASE_DIR / "data" / "policy_tracker.sqlite3"),
-        kb_work_dir=str(BASE_DIR / "data" / "kb"),
+        tracker_db=str(DATA_DIR / "policy_tracker.sqlite3"),
+        kb_work_dir=str(DATA_DIR / "kb"),
         kb_id="tax_policy",
         notify_hooks=[logging_notify_hook],
     )

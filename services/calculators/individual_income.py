@@ -123,7 +123,7 @@ def calculate_individual_income_annual(
     if taxable <= 0:
         notes.append("综合所得减除全部扣除后 ≤ 0，年度应纳税额为 0")
         final_tax = 0.0
-        diff = fmt_money(paid_tax - 0)  # 多交了可退
+        diff = fmt_money(final_tax - paid_tax)
     else:
         steps.append(CalcStep(
             label="应纳税所得额",
