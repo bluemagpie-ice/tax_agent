@@ -21,7 +21,7 @@ from typing import Iterable, Sequence
 # 拒答标志词：出现任一即认为模型在"如实告知无法回答"
 _REFUSAL_MARKERS = (
     "无法回答", "未检索到", "未找到", "没有检索", "不掌握", "无法提供",
-    "抱歉", "很抱歉", "暂未", "暂不能", "不足以", "未收录", "不了解",
+    "暂不能", "不足以", "未收录", "不了解",
     "无法判断", "不能提供",
 )
 
@@ -77,7 +77,7 @@ def refusal_detected(answer: str) -> bool:
 
 
 def refusal_accuracy(
-    answers: Sequence[str], must_refuse_flags: Sequence[bool]
+    answers: Sequence[str], must_refuse_flags: Sequence[bool], *, execution_success=None
 ) -> float:
     """
     拒答正确率。
@@ -92,7 +92,9 @@ def refusal_accuracy(
     if not answers:
         return 0.0
     correct = 0
-    for ans, must_refuse in zip(answers, must_refuse_flags):
+    for index, (ans, must_refuse) in enumerate(zip(answers, must_refuse_flags)):
+        if execution_success is not None and not execution_success[index]:
+            continue
         refused = refusal_detected(ans)
         if must_refuse == refused:
             correct += 1

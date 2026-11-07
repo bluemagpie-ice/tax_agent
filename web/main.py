@@ -175,7 +175,10 @@ async def lifespan(app: FastAPI):
     if "sources" in policy_cfg:
         policy_updater.remove_source("local_policies")
     for source in policy_cfg.get("sources", defaults):
-        policy_updater.add_source(policy_source_from_config(source))
+        try:
+            policy_updater.add_source(policy_source_from_config(source))
+        except (ValueError, KeyError, OSError) as exc:
+            logger.warning("政策来源配置不安全或无效，已跳过（%s）", type(exc).__name__)
     # 启动后台定时扫描（每 6 小时一次）
     policy_updater.start_scheduler(interval_seconds=policy_cfg.get("interval_hours", 6) * 3600, run_immediately=False)
     app.state.policy_updater = policy_updater
@@ -1368,18 +1371,21 @@ async def retract_last_turn(session_id: str, current_user: CurrentUser = Depends
 # 政策自动更新 API
 # ================================================================
 
-def policy_source_from_config(data):
+def policy_source_from_config(data, *, check_network=False):
     from knowledge.policy_updater import LocalDirectorySource, HttpCrawlSource, TaxGovCnSource
     kind = data.get("source_type") or data.get("type")
     if kind in ("local", "local_directory"):
-        return LocalDirectorySource(directory=data["directory"], source_id=data["source_id"],
+        directory = Path(data["directory"]).resolve()
+        if not directory.is_relative_to((DATA_DIR / "policies").resolve()):
+            raise ValueError("本地政策源必须位于 data/policies 中")
+        return LocalDirectorySource(directory=str(directory), source_id=data["source_id"],
                                     recursive=data.get("recursive", True), category=data.get("category", ""))
     if kind == "http":
         for url in data["urls"]:
-            validate_outbound_url(url)
+            validate_outbound_url(url, resolve_dns=check_network)
         return HttpCrawlSource(source_id=data["source_id"], urls=data["urls"], category=data.get("category", ""))
     url = data.get("listing_url") or (data.get("urls") or [""])[0]
-    validate_outbound_url(url)
+    validate_outbound_url(url, resolve_dns=check_network)
     options = {key:data[key] for key in ("max_pages", "max_items", "link_selector", "title_selector", "content_selector", "date_selector") if key in data}
     if kind == "website":
         options.update(link_selector="a[href*='content.html'], a[href*='/t20'], a[href^='./20'], main a[href$='.html'], .list a[href$='.html']",
@@ -1465,7 +1471,7 @@ def add_policy_source(body: PolicySourceRequest, current_user: CurrentUser = Dep
         elif body.type in ("http", "website"):
             if not body.urls:
                 raise HTTPException(status_code=400, detail="type=http 时必须提供 urls")
-            src = policy_source_from_config({**body.model_dump(), "source_id":body.source_id or "site_" + uuid.uuid4().hex[:12]})
+            src = policy_source_from_config({**body.model_dump(), "source_id":body.source_id or "site_" + uuid.uuid4().hex[:12]}, check_network=True)
         else:
             raise HTTPException(status_code=400, detail=f"不支持的政策源类型: {body.type}，仅支持 local / http / website")
 

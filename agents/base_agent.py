@@ -13,6 +13,11 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Optional
 import logging
+from contextvars import ContextVar
+
+runtime_memory = ContextVar("agent_runtime_memory", default=None)
+runtime_checkpoint_path = ContextVar("agent_runtime_checkpoint_path", default=None)
+runtime_connections = ContextVar("agent_runtime_connections", default=None)
 
 from agents.base_context import BaseContext
 from services.security import checkpoint_thread_id
@@ -47,6 +52,8 @@ _memory_lock = None
 def _get_shared_memory() -> "ConversationMemory":
     """获取全局共享的 ConversationMemory 单例（线程安全，懒初始化）。"""
     global _conversation_memory, _memory_lock
+    if runtime_memory.get() is not None:
+        return runtime_memory.get()
     if _conversation_memory is not None:
         return _conversation_memory
     import threading
@@ -127,8 +134,11 @@ class BaseAgent(ABC):
             return
         try:
             import aiosqlite
-            _CHECKPOINT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-            conn = await aiosqlite.connect(str(_CHECKPOINT_DB_PATH))
+            checkpoint_path = runtime_checkpoint_path.get() or _CHECKPOINT_DB_PATH
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = await aiosqlite.connect(str(checkpoint_path))
+            if runtime_connections.get() is not None:
+                runtime_connections.get().append(conn)
             self._checkpointer = AsyncSqliteSaver(conn)
             await self._checkpointer.setup()
             logging.info(

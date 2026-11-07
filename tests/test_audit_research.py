@@ -25,13 +25,17 @@ def test_policy_period_requires_interval_context(quote, status):
 
 
 def test_report_question_id_and_redaction_do_not_drop_valid_analysis():
-    evidence = normalize_evidence(POLICY)
-    assessment = covered()
-    assessment["coverage"][0]["question_id"] = "q1"
+    evidence = normalize_evidence({**POLICY, "content":"模拟政策明确规定：满足条件A时无需申报。"})
+    eid = evidence["evidence_id"]
+    assessment = {"coverage":[{"question":"原问题", "question_id":"q1", "sufficient":True, "evidence_ids":[eid]}]}
     result = report()
-    result["analysis"][0].update(question_id="q1", question="改写的问题", finding="满足上述证据条件时无需申报；电话13812345678")
+    result["analysis"][0].update(question_id="q1", question="改写的问题", evidence_ids=[eid],
+        finding="满足上述证据条件时无需申报；电话13812345678")
     assert ResearchAgent.report_issues(result, [evidence], assessment)["ok"]
     assert "13812345678" not in result["analysis"][0]["finding"]
+    evidence["content"] = "未讨论申报规则。"
+    result["analysis"][0]["finding"] = "无需申报。"
+    assert "unsafe_tax_advice" in ResearchAgent.report_issues(result, [evidence], assessment)["issues"]
 
 
 def test_model_timeout_can_resume_assessment_without_retrieval(tmp_path, monkeypatch):

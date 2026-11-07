@@ -27,6 +27,7 @@ def document_app(tmp_path, monkeypatch):
     Base.metadata.create_all(engine)
     monkeypatch.setattr(repos, "SessionLocal", sessionmaker(bind=engine))
     monkeypatch.setitem(main.PATHS, "data", str(tmp_path / "data"))
+    monkeypatch.setattr("services.paths.DATA_DIR", tmp_path / "data")
     monkeypatch.setitem(main.PATHS, "uploads", str(tmp_path / "uploads"))
     (tmp_path / "uploads").mkdir()
     from agents.memory import ConversationMemory

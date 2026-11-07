@@ -63,6 +63,25 @@ def test_policy_fetch_rejects_redirect_and_oversize():
     assert session.get.call_args.kwargs["allow_redirects"] is False
 
 
+def test_policy_source_admin_cannot_use_external_directory_or_private_url(tmp_path, monkeypatch):
+    from web import main
+    monkeypatch.setattr(main, "policy_updater", object())
+    client = TestClient(main.app)
+    for payload in ({"type":"local", "directory":str(tmp_path)},
+                    {"type":"http", "urls":["http://169.254.169.254/metadata"]}):
+        response = client.post("/api/policy/sources", headers=ADMIN, json=payload)
+        assert response.status_code == 400
+
+
+def test_saved_public_policy_source_does_not_need_dns_at_startup(monkeypatch):
+    from web.main import policy_source_from_config
+    def offline(*args, **kwargs):
+        raise OSError("offline test")
+    monkeypatch.setattr("socket.getaddrinfo", offline)
+    source = policy_source_from_config({"source_type":"http", "source_id":"public", "urls":["https://example.com/"]})
+    assert source.urls == ["https://example.com/"]
+
+
 def test_templates_have_no_embedded_access_token():
     for path in (Path(__file__).parents[1] / "web" / "templates").glob("*.html"):
         source = path.read_text(encoding="utf-8")

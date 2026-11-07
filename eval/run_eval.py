@@ -8,16 +8,16 @@
     python -m eval.run_eval --mode intent
 
     # 只评测答案质量（需要真实 LLM + Qdrant 知识库）
-    python -m eval.run_eval --mode answer
+    python -m eval.run_eval --mode answer --live
 
     # 完整评测（意图 + 答案，默认）
-    python -m eval.run_eval --mode all
+    python -m eval.run_eval --mode all --live
 
     # 指定评测对象（默认 tax_agent 编排器）
     python -m eval.run_eval --agent knowledge_agent
 
     # 把明细结果导出 JSON
-    python -m eval.run_eval --mode all --json eval_report.json
+    python -m eval.run_eval --mode all --live --json eval_report.json
 
 说明：
 - intent 评测走 HybridIntentRouter.classify()，纯本地，无需 LLM/向量库。
@@ -61,44 +61,66 @@ def run_intent_eval(samples):
     return predicted, details
 
 
-async def run_answer_eval(samples, agent_name: str):
-    """答案质量评测（需 LLM + Qdrant）。返回 (answers, 明细)。"""
-    if agent_name == "tax_agent":
-        from agents.tax_agent import TaxAgent
-        agent = TaxAgent()
-    elif agent_name == "knowledge_agent":
-        from agents.knowledge_agent import KnowledgeAgent
-        agent = KnowledgeAgent()
-    else:
-        raise ValueError(f"未知 agent: {agent_name}")
-
-    answers = []
-    details = []
-    for s in samples:
-        try:
-            ans = await agent.run(s.query, context={"thread_id": f"eval_{s.id}"})
-        except Exception as e:  # noqa: BLE001 —— 单条失败不中断整体评测
-            ans = f"（评测执行出错: {e}）"
-        answers.append(ans)
-        details.append({
-            "id": s.id,
-            "query": s.query,
-            "answer": ans,
-            "keyword_recall": round(keyword_recall(ans, s.expected_keywords), 4),
-            "refused": refusal_detected(ans),
-            "must_refuse": s.must_refuse,
-        })
-    return answers, details
+async def run_answer_eval(samples, agent_name: str, *, runtime_root=None):
+    """Run with unique tenant, memory and checkpoint paths; errors score zero."""
+    import uuid
+    from pathlib import Path
+    from agents.base_agent import runtime_memory, runtime_checkpoint_path, runtime_connections
+    from agents.memory import ConversationMemory
+    from services.paths import DATA_DIR
+    from services.security import tenant_scope, read_only_retrieval
+    run_id = uuid.uuid4().hex
+    directory = Path(runtime_root) if runtime_root else DATA_DIR / "eval_runs" / run_id
+    directory.mkdir(parents=True, exist_ok=True)
+    connections = []
+    tokens = [runtime_memory.set(ConversationMemory(directory / "memory")),
+              runtime_checkpoint_path.set(directory / "checkpoints.sqlite"), runtime_connections.set(connections)]
+    read_only_token = read_only_retrieval.set(True)
+    answers, details = [], []
+    try:
+        if agent_name == "tax_agent":
+            from agents.tax_agent import TaxAgent
+            agent = TaxAgent(workdir_root=str(directory))
+        elif agent_name == "knowledge_agent":
+            from agents.knowledge_agent import KnowledgeAgent
+            agent = KnowledgeAgent(workdir_root=str(directory))
+        else:
+            raise ValueError(f"未知 agent: {agent_name}")
+        with tenant_scope("eval-" + run_id):
+            for sample in samples:
+                try:
+                    answer = await agent.run(sample.query, context={"thread_id": f"eval_{run_id}_{sample.id}"})
+                    if not isinstance(answer, str) or not answer.strip():
+                        raise ValueError("empty answer")
+                    success, error_type = True, None
+                except Exception as exc:
+                    answer, success, error_type = "", False, type(exc).__name__
+                answers.append(answer)
+                refused = refusal_detected(answer) if success else None
+                details.append({"id":sample.id, "query":sample.query, "answer":answer,
+                    "execution_success":success, "error_type":error_type,
+                    "keyword_recall":round(keyword_recall(answer, sample.expected_keywords),4) if success else 0,
+                    "refused":refused, "must_refuse":sample.must_refuse,
+                    "refusal_correct": bool(success and refused == sample.must_refuse)})
+        return answers, details
+    finally:
+        for connection in connections:
+            await connection.close()
+        runtime_memory.reset(tokens[0]); runtime_checkpoint_path.reset(tokens[1]); runtime_connections.reset(tokens[2])
+        read_only_retrieval.reset(read_only_token)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="税务 Agent 评测")
-    parser.add_argument("--mode", choices=["intent", "answer", "all"], default="all")
+    parser.add_argument("--mode", choices=["intent", "answer", "all"], default="intent")
     parser.add_argument(
         "--agent", choices=["tax_agent", "knowledge_agent"], default="tax_agent"
     )
     parser.add_argument("--json", type=str, default="", help="明细结果 JSON 输出路径")
+    parser.add_argument("--live", action="store_true", help="显式启用真实模型评测，可能产生调用费用")
     args = parser.parse_args()
+    if args.mode in ("answer", "all") and not args.live:
+        parser.error("答案评测需要显式 --live；离线运行使用 --mode intent")
 
     samples = load_dataset()
     expected_intents = [s.expected_intent for s in samples]
@@ -132,10 +154,11 @@ def main() -> None:
             )
             answers = []
         else:
-            kr = macro_keyword_recall(answers, expected_keywords)
-            ra = refusal_accuracy(answers, must_refuse)
+            kr = sum(d["keyword_recall"] for d in answer_details) / max(len(answer_details), 1)
+            ra = refusal_accuracy(answers, must_refuse, execution_success=[d["execution_success"] for d in answer_details])
             print(f"关键词召回率(宏): {kr:.2%}")
             print(f"拒答正确率      : {ra:.2%}")
+            print(f"执行失败样本数  : {sum(not d['execution_success'] for d in answer_details)}")
             for d in answer_details:
                 if d["refused"] != d["must_refuse"]:
                     print(

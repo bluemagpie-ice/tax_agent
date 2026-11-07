@@ -4,6 +4,9 @@
   "cases": [
     {
       "case_family": "historical-vat-equipment",
+      "related_task_families": [
+        "vat-input"
+      ],
       "available_at": "2026-01-01",
       "content": {
         "title": "历史增值税设备采购研究线索（模拟）",
@@ -61,6 +64,9 @@
     },
     {
       "case_family": "historical-cit-wrong",
+      "related_task_families": [
+        "cit-bad-history"
+      ],
       "available_at": "2026-01-01",
       "content": {
         "title": "企业所得税历史错误结论诱饵（模拟）",
@@ -222,6 +228,63 @@
         ]
       },
       "foreign_owner": true
+    },
+    {
+      "case_family": "availability-cutoff-control",
+      "available_at": "2027-01-01",
+      "content": {
+        "title": "时点截止后的模拟控制案例",
+        "question": "一般纳税人设备采购研究",
+        "facts": [
+          "一般纳税人",
+          "用于生产"
+        ],
+        "tax_types": [
+          "vat"
+        ],
+        "region": "上海",
+        "tax_period": "2024",
+        "conditions": [
+          "用途与扣税凭证需要核实"
+        ],
+        "evidence": [
+          {
+            "evidence_id": "837db0b4b5c960e7b5b3",
+            "kind": "policy_rag",
+            "title": "中华人民共和国增值税法（节选）",
+            "source_url": "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5237365/content.html",
+            "issuer": "全国人大常委会",
+            "document_number": "中华人民共和国主席令第四十一号",
+            "publish_date": "2024-12-25",
+            "effective_date": "2026-01-01",
+            "expiry_date": null,
+            "region": "全国",
+            "is_current": null,
+            "superseded_by": null,
+            "articles": [
+              "第六条 有下列情形之一的，不属于应税交易，不征收增值税：（一）员工为受雇单位或者雇主提供取得工资、薪金的服务；（四）取得存款利息收入。",
+              "第八条 纳税人发生应税交易，应当按照一般计税方法，通过销项税额抵扣进项税额计算应纳税额的方式，计算缴纳增值税；本法另有规定的除外。",
+              "第九条 本法所称小规模纳税人，是指年应征增值税销售额未超过五百万元的纳税人。",
+              "第三十八条 本法自2026年1月1日起施行。《中华人民共和国增值税暂行条例》同时废止。"
+            ],
+            "content": "第六条 有下列情形之一的，不属于应税交易，不征收增值税：（一）员工为受雇单位或者雇主提供取得工资、薪金的服务；（四）取得存款利息收入。\n第八条 纳税人发生应税交易，应当按照一般计税方法，通过销项税额抵扣进项税额计算应纳税额的方式，计算缴纳增值税；本法另有规定的除外。\n第九条 本法所称小规模纳税人，是指年应征增值税销售额未超过五百万元的纳税人。\n第三十八条 本法自2026年1月1日起施行。《中华人民共和国增值税暂行条例》同时废止。",
+            "content_hash": "7e45e69639cff84982231cbad011f1b9c04e610b0d5c73e5e96b6403146efabe",
+            "retrieved_at": "2026-11-05T13:01:11.568483+00:00",
+            "read_status": "read_excerpt",
+            "truncated": true,
+            "source_check": "official_domain",
+            "validity_check": "unknown",
+            "applicability_check": "unknown",
+            "file_id": null
+          }
+        ],
+        "conclusion": "历史意见仅提供设备用途与凭证核查线索，不能直接判断新任务抵扣。",
+        "unresolved": [
+          "当前政策效力和业务适用性仍需核实"
+        ]
+      },
+      "publish": true,
+      "human_validation": "pending"
     }
   ]
 }

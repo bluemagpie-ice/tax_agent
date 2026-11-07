@@ -5,7 +5,7 @@ import socket
 from urllib.parse import urlsplit
 
 
-def validate_outbound_url(value: str, *, model=False) -> str:
+def validate_outbound_url(value: str, *, model=False, resolve_dns=True) -> str:
     url = urlsplit(value)
     if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password or url.fragment:
         raise ValueError("需要不含凭证的 HTTP(S) 地址")
@@ -26,6 +26,8 @@ def validate_outbound_url(value: str, *, model=False) -> str:
     try:
         addresses = [ipaddress.ip_address(url.hostname)]
     except ValueError:
+        if not resolve_dns:
+            return value
         try:
             addresses = [ipaddress.ip_address(row[4][0]) for row in socket.getaddrinfo(url.hostname, port, type=socket.SOCK_STREAM)]
         except OSError as exc:

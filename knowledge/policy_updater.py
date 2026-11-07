@@ -142,12 +142,16 @@ class LocalDirectorySource(PolicySource):
 
         pattern = "**/*" if self.recursive else "*"
         items: list[PolicyItem] = []
+        root = Path(self.directory).resolve()
         for path in Path(self.directory).glob(pattern):
             if not path.is_file():
                 continue
             if path.suffix.lower() not in self.SCAN_EXTENSIONS:
                 continue
             try:
+                path = path.resolve()
+                if not path.is_relative_to(root):
+                    raise ValueError("政策文件链接超出已配置目录")
                 stat = path.stat()
                 if path.suffix.lower() in {".md", ".txt"}:
                     content = path.read_text(encoding="utf-8-sig")

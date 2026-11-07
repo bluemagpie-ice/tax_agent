@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 from services.paths import DATA_DIR
 from services.config_manager import ConfigManager
 from services.cache_utils import TTLCache
-from services.security import current_tenant_id, document_session, document_visible, blocked_document_ids
+from services.security import current_tenant_id, document_session, document_visible, blocked_document_ids, read_only_retrieval
 import logging
 import numpy as np
 
@@ -205,7 +205,7 @@ class QdrantService:
         )
 
         # 确保集合存在 or 创建集合
-        if not read_only:
+        if not read_only and not read_only_retrieval.get():
             self._ensure_collection()
 
     def _ensure_collection(self):
@@ -245,6 +245,8 @@ class QdrantService:
         :param chunks: 文本块列表（含 metadata 字段）
         :param embeddings: 向量矩阵，与 chunks 列表对应
         """
+        if read_only_retrieval.get():
+            raise PermissionError("评测仅允许只读检索")
         if len(chunks) != len(embeddings):
             raise ValueError("分块与向量数量不一致，未写入")
         if chunks:
@@ -347,6 +349,8 @@ class QdrantService:
         :param file_id: 入库时关联的文件 id
         :return: 删除的点数量
         """
+        if read_only_retrieval.get():
+            raise PermissionError("评测仅允许只读检索")
         from qdrant_client.models import Filter, FieldCondition, MatchValue
 
         # 先查一下有多少条匹配的（用于日志和返回值）
@@ -384,6 +388,8 @@ class QdrantService:
         return deleted_count
 
     def set_file_metadata(self, file_id: str, metadata: dict) -> None:
+        if read_only_retrieval.get():
+            raise PermissionError("评测仅允许只读检索")
         from qdrant_client.models import Filter, FieldCondition, MatchValue
         self.client.set_payload(collection_name=self.COLLECTION_NAME, payload=metadata,
             points=Filter(must=[FieldCondition(key="file_id", match=MatchValue(value=file_id))]), wait=True)
@@ -885,6 +891,9 @@ class EmbeddingService:
         :param skip_rebuild: 跳过索引重建（Agent 复用已有 Qdrant 数据时设为 True）
         """
         self.store = store
+        if read_only_retrieval.get():
+            qdrant_read_only = skip_rebuild = True
+            use_neo4j = False
         self.embedding_model = self._load_embedding_model()
         self.embedding_matrix = None
         self._index_chunks: list = []

@@ -436,7 +436,7 @@ class ResearchAgent(BaseAgent):
             if not self.search:
                 restore_policy_metadata(records)
             for record in records:
-                if record.get("content") and document_visible(record):
+                if record.get("content") and record.get("source_type") == "default" and document_visible(record):
                     add(record, "policy_rag", question_ids, step_id)
             if data.get("web_search"):
                 options = {"source": "gov_cn"} if self.web_search else {}
@@ -634,6 +634,10 @@ class ResearchAgent(BaseAgent):
         issues, unmatched, used, details = [], [], set(), []
         if not report["analysis"]:
             issues.append("unsupported_conclusion")
+        def explicit_nonfiling_support(refs):
+            return any(sources[eid].get("source_check") == "official_domain" and re.search(
+                r"(?:无需|不需要|不需|可不|免于)(?:办理)?申报", sources[eid].get("content", ""))
+                for eid in refs if eid in sources)
         resolved = set()
         for index, item in enumerate(report["analysis"]):
             qid = item.get("question_id") or question_ids.get(item["question"])
@@ -649,14 +653,14 @@ class ResearchAgent(BaseAgent):
                                 "message": "子问题未充分覆盖或引用不属于该题", "allowed_evidence_ids": sorted(covered.get(qid, set()))})
             used.update(refs & sources.keys())
             item["finding"], checks = check_answer(item["finding"], sources=[sources[eid] for eid in sorted(refs & sources.keys())],
-                                     citation_details=True, allow_nonfiling=bool(refs and refs <= covered.get(qid, set())))
+                                     citation_details=True, allow_nonfiling=bool(refs and refs <= covered.get(qid, set()) and explicit_nonfiling_support(refs)))
             unmatched.extend(checks["unmatched_citations"])
             issues.extend(issue for issue in checks["issues"] if issue != "sensitive_identifier")
         if questions and (questions[0].get("question_id") or "q1") not in resolved:
             issues.append("unsupported_conclusion")
             details.append({"field":"analysis", "message":"缺少核心子问题 q1 的有据分析"})
         report["answer_draft"], checks = check_answer(report["answer_draft"], sources=[sources[eid] for eid in sorted(used)],
-                                 citation_details=True, allow_nonfiling=bool(used and not issues))
+                                 citation_details=True, allow_nonfiling=bool(used and not issues and explicit_nonfiling_support(used)))
         unmatched.extend(checks["unmatched_citations"])
         issues.extend(issue for issue in checks["issues"] if issue != "sensitive_identifier")
         if unmatched:
@@ -709,6 +713,13 @@ class ResearchAgent(BaseAgent):
                 raise ResearchFailure(code, "修正后的初稿仍未通过证据或合规校验，尚未生成可复核报告", details=checks)
         parsed.update(original_query=data.get("original_query", data["query"]), confirmed_facts=data["facts"],
                       unconfirmed_facts=data["unknowns"], case_references=data.get("case_references", []))
+        from services.security import redact_identifiers
+        for key in ("scope",):
+            parsed[key] = redact_identifiers(parsed[key])
+        for key in ("uncertainties", "follow_up_questions", "confirmed_facts", "unconfirmed_facts"):
+            parsed[key] = [redact_identifiers(value) for value in parsed[key]]
+        for item in parsed["analysis"]:
+            item["question"] = redact_identifiers(item["question"])
         used = {eid for item in parsed["analysis"] for eid in item["evidence_ids"]}
         parsed = validate_report(parsed, [item for item in evidence if item["evidence_id"] in used])
         data.update(report=parsed, report_version=data.get("report_version", 0) + 1,

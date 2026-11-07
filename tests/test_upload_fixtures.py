@@ -57,7 +57,7 @@ def test_original_csv_upload_metadata_and_persistence(document_app):
     assert data["mime_type"] == "text/csv"
     assert data["file_name"] == path.name  # 原API字段仍保留。
     assert client.get(data["url"], headers=USER).json()["content"].find("156000") >= 0
-    assert client.get(data["url"]).status_code == 422
+    assert client.get(data["url"]).status_code == 401
     record = service._kb._metadata["files"][0]
     assert Path(record["file_path"]).read_bytes() == path.read_bytes()
     from database.repositories import KnowledgeFileRepository, KnowledgeChunkRepository
@@ -88,7 +88,9 @@ def test_whitespace_document_is_not_success(document_app):
 
 
 def test_pdf_ocr_page_failure_does_not_become_document(monkeypatch):
-    import pdf2image
+    import sys
+    pdf2image = SimpleNamespace(pdfinfo_from_path=None, convert_from_path=None)
+    monkeypatch.setitem(sys.modules, "pdf2image", pdf2image)
     from PIL import Image
     from knowledge.parser import PdfParser
     parser = PdfParser(str(FIXTURES / "test_pdf_2.pdf"))

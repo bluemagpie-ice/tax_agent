@@ -73,14 +73,6 @@ def _mock_agents():
     with patch(_MOCKED_AGENT_PATH, fake_agent), \
          patch("web.main.tax_agent", fake_tax_agent), \
          patch("web.main.conversation_memory", fake_memory):
-        # 重新导入 app，确保 patch 生效
-        if "web.main" in sys.modules:
-            del sys.modules["web.main"]
-        # 把 mock 注入到 web.main 命名空间
-        import web.main as main_module
-        main_module.knowledge_agent = fake_agent
-        main_module.tax_agent = fake_tax_agent
-        main_module.conversation_memory = fake_memory
         yield
 
 @pytest.fixture
@@ -135,14 +127,14 @@ class TestSkillsEndpoint:
 
 # ================================================================== 4 & 5. POST /api/chat 认证错误
 class TestChatAuth:
-    def test_chat_without_auth_header_returns_422(self, client):
+    def test_chat_without_auth_header_returns_401(self, client):
         """不带 Authorization 头 → FastAPI Header(...) 必填校验 → 422"""
         resp = client.post(
             "/api/chat",
             json={"user_id": "u1", "query": "什么是增值税"},
             # 故意不带 headers
         )
-        assert resp.status_code == 422  # 422 Unprocessable Entity（参数校验失败）
+        assert resp.status_code == 401  # 422 Unprocessable Entity（参数校验失败）
 
     def test_chat_without_bearer_prefix_returns_401(self, client):
         """带 Authorization 但不是 Bearer 格式 → 401"""
@@ -241,26 +233,26 @@ class TestOtherEndpoints:
     def test_memory_endpoint_requires_auth(self, client):
         """未带 Authorization 头访问 /api/memory → 应被拒绝（Header 必填 → 422）"""
         resp = client.get("/api/memory", params={"user_id": "u1"})
-        assert resp.status_code == 422
+        assert resp.status_code == 401
 
     def test_conversations_endpoint_requires_auth(self, client):
         """未带 Authorization 头访问 /api/conversations → 应被拒绝"""
         resp = client.get("/api/conversations", params={"user_id": "u1"})
-        assert resp.status_code == 422
+        assert resp.status_code == 401
 
     def test_knowledge_upload_no_file_returns_422(self, client):
         resp = client.post("/api/knowledge/upload")
-        assert resp.status_code == 422  # 缺少 file 参数
+        assert resp.status_code == 401  # 缺少 file 参数
 
     def test_settings_requires_auth(self, client):
         """未带 Authorization 头访问 /api/settings → 应被拒绝"""
         resp = client.get("/api/settings")
-        assert resp.status_code == 422
+        assert resp.status_code == 401
 
     def test_policy_status_requires_auth(self, client):
         """未带 Authorization 头访问 /api/policy/status → 应被拒绝"""
         resp = client.get("/api/policy/status")
-        assert resp.status_code == 422
+        assert resp.status_code == 401
 
     def test_me_returns_user_role(self, client):
         resp = client.get("/api/me", headers={"Authorization": "Bearer test_token_123"})
@@ -278,15 +270,15 @@ class TestOtherEndpoints:
 
     def test_me_requires_auth(self, client):
         resp = client.get("/api/me")
-        assert resp.status_code == 422
+        assert resp.status_code == 401
 
     def test_knowledge_databases_requires_auth(self, client):
         resp = client.get("/api/knowledge/databases")
-        assert resp.status_code == 422
+        assert resp.status_code == 401
 
     def test_create_knowledge_database_requires_auth(self, client):
         resp = client.post("/api/knowledge/databases", json={"name": "测试库"})
-        assert resp.status_code == 422
+        assert resp.status_code == 401
 
     def test_list_knowledge_databases(self, client):
         fake_mgr = MagicMock()
@@ -298,7 +290,7 @@ class TestOtherEndpoints:
 
     def test_rename_conversation_requires_auth(self, client):
         resp = client.patch("/api/conversations/sess_1", json={"title": "新标题"})
-        assert resp.status_code == 422
+        assert resp.status_code == 401
 
     def test_rename_conversation_works(self, client):
         resp = client.patch(

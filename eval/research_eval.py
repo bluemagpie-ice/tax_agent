@@ -63,7 +63,7 @@ class SmokeModel:
         if '"title": "Understanding"' in instruction:
             result = {"facts":[], "unknowns":["模拟执行未进行业务事实核验"], "questions":[payload['query'][:500]]}
         elif '"title": "ResearchPlan"' in instruction:
-            result = {"steps":[{"step_id":"s1", "question":payload['questions'][0], "depends_on":[]}]}
+            result = {"steps":[{"step_id":"s1", "question":next(iter(payload['questions'].values())) if isinstance(payload['questions'], dict) else payload['questions'][0], "depends_on":[]}]}
         elif '"title": "Assessment"' in instruction:
             result = {"coverage":[], "next_queries":[]}
         else:
@@ -119,7 +119,8 @@ async def run_experiments(config, *, smoke=False, allow_unverified=False, limit=
         tasks = tasks[:limit]
     if not tasks:
         raise ValueError('所选数据划分没有测试任务')
-    case_families = {c['case_family'] for c in cases['cases']}
+    case_families = {family for c in cases['cases'] for family in (c['case_family'], *c.get('related_task_families', []))}
+    snapshot_urls = {record.get('source_url') for record in policy['records']}
     development_families = {t['case_family'] for t in dataset['tasks'] if t['split'] == 'development'}
     evaluation_families = {t['case_family'] for t in dataset['tasks'] if t['split'] == 'evaluation'}
     if development_families & evaluation_families:
@@ -213,6 +214,7 @@ async def run_experiments(config, *, smoke=False, allow_unverified=False, limit=
                     "test_category":test['test_category'],"run_timestamp":utcnow(), **controls,
                     "latency_ms":round((time.perf_counter()-started)*1000), **usage_summary(data,config.get('pricing')),
                     "task_status":"failed" if error else data['status'],"error_type":error,
+                    "snapshot_matching_sources":len(snapshot_urls.intersection(test.get("source_urls", []))),
                     "human_validation_status":test.get('human_validation',{}).get('status','unknown'),
                     "leakage_flags":test.get('leakage_flags',[]) + (["case_family_overlap"] if test['case_family'] in case_families else []),
                     "clarification_policy":"use_dataset_facts_then_keep_unknowns_in_all_groups"}

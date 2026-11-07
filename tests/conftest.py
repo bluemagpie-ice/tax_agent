@@ -31,7 +31,7 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
-def isolate_runtime(tmp_path, monkeypatch):
+def isolate_runtime(tmp_path, monkeypatch, request):
     import socket
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
@@ -57,6 +57,11 @@ def isolate_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(base, "_conversation_memory", None)
     monkeypatch.setattr(base.BaseAgent, "base_workdir", str(tmp_path / "agents"))
     monkeypatch.setattr(memory, "DATA_DIR", tmp_path)
+    if request.path.name in ("test_knowledge_agent.py", "test_rag_sub_agent.py"):
+        monkeypatch.setenv("LLM_API_KEY", "unit-test-placeholder")
+        monkeypatch.setenv("LLM_MODEL_ID", "unit-test-model")
+        monkeypatch.setenv("LLM_BASE_URL", "https://provider.example/v1")
+        monkeypatch.setattr("knowledge.embedding._NEO4J_AVAILABLE", False)
     monkeypatch.setenv("TAX_AGENT_MODEL_ALLOWED_ORIGINS", "http://localhost:8000,http://localhost:6333")
     # DNS is a test dependency, never resolve production hosts from unit tests.
     def public_dns(host, port, *args, **kwargs):

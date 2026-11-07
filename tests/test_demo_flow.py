@@ -66,7 +66,7 @@ def test_config_mask_and_invalid_url_do_not_overwrite_key(tmp_path, monkeypatch)
 def test_settings_refreshes_existing_client(runtime):
     _, client, agent = runtime
     agent.llm = SimpleNamespace(temperature=0.3)
-    resp = client.post("/api/settings", headers={"Authorization": "Bearer test_token_123"},
+    resp = client.post("/api/settings", headers={"Authorization": "Bearer admin_token_456"},
                        json={"llm": {"api_key": "demo-secret-key", "model": "custom-model", "base_url": "https://example.com/v1"}})
     assert resp.status_code == 200
     assert agent.llm.model_name == "custom-model"

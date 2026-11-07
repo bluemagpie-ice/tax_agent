@@ -17,6 +17,8 @@ def test_paired_exports_keep_missing_usage_and_quality_unscored(tmp_path,monkeyp
     out = asyncio.run(run_experiments(config,smoke=True,limit=1,output=tmp_path))
     rows = list(csv.DictReader((out / 'runs.csv').open(encoding='utf-8-sig')))
     assert len(rows) == 6
+    assert all('case_family_overlap' in r['leakage_flags'] for r in rows)
+    assert all(int(r['snapshot_matching_sources']) >= 1 for r in rows)
     assert {r['experiment_group'] for r in rows} == {'A','B','C'}
     assert all(r['total_tokens'] == '' and r['estimated_cost'] == '' for r in rows)
     assert all(r['task_status'] == 'failed' for r in rows)
@@ -24,6 +26,9 @@ def test_paired_exports_keep_missing_usage_and_quality_unscored(tmp_path,monkeyp
     assert all('task' in r and r['run']['smoke_test'] for r in raw)
     assert all(not r['task'].get('case_references') for r in raw if r['run']['experiment_group'] != 'B')
     assert all('case_references' in r['task'] for r in raw if r['run']['experiment_group'] == 'B')
+    cited_titles = {case['content']['title'] for row in raw for case in row['task'].get('case_references', [])}
+    assert '历史增值税设备采购研究线索（模拟）' in cited_titles
+    assert '时点截止后的模拟控制案例' not in cited_titles
     scores = list(csv.DictReader((out / 'quality_scores_template.csv').open(encoding='utf-8-sig')))
     assert all(s['conclusion_correct'] == '' for s in scores)
     paired = summarize(out)

@@ -47,7 +47,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 - **对话模型。** 在首页打开「模型配置」，填入支持 OpenAI 兼容接口的 Base URL、模型 ID 和 API Key。点击「检测连接」，成功后保存。也可以在启动前通过 [配置样例](.env.example) 对照填写 `.env` 中的 `LLM_*` 项。页面已保存的模型配置优先于环境变量。
 - **政策知识库。** 文档向量入库和检索需要 Embedding 服务及可访问的 Qdrant。配置 `EMBEDDING_*`、`VECTOR_SIZE` 和 `QDRANT_CLUSTER_URL`，按实例要求填写 `QDRANT_API_KEY`。向量维度应与所选 Embedding 模型匹配。启动时会尝试将 `knowledge/presets/` 下的预置资料入库。
 - **官网检索。** 首次试用 Research 时，可勾选「检索并读取官方网页」，通过网络搜索和读取官方来源。关闭该选项时，研究依赖已配置且有相关资料的政策知识库。
-- **本地身份。** 页面默认使用演示 Token。若修改了 `AUTH_USER_TOKEN` 或 `DEVELOPER_TOKEN`，在「模型配置」的「访问 Token」中填入相应值。
+- **本地身份。** 在 `.env` 配置不同的 `AUTH_USER_TOKEN` 与 `DEVELOPER_TOKEN`（或 `AUTH_ADMIN_TOKEN`）。首页「模型配置」中填入凭证并选择「验证并应用访问 Token」。管理配置和政策更新仅管理员可用；本地模型/Qdrant 地址在 `TAX_AGENT_MODEL_ALLOWED_ORIGINS` 显式允许。
 
 外部模型、向量和搜索服务可能接收问题或检索内容。试用时请使用公开资料或已泛化的业务事实。
 

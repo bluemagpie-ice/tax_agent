@@ -271,6 +271,8 @@ class TestTaxGovCnSource:
 
         src = TaxGovCnSource(listing_url="https://example.com/list.html", source_id="chinatax")
         fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.iter_content.side_effect = lambda size: [fake_resp.text.encode("utf-8")]
         fake_resp.headers = {"Content-Type": "text/html; charset=utf-8"}
         fake_resp.text = (
             "<html><body>"
@@ -306,8 +308,10 @@ class TestTaxGovCnSource:
             "</body></html>"
         )
 
-        def fake_get(url, timeout=None):
+        def fake_get(url, timeout=None, **kwargs):
             resp = MagicMock()
+            resp.status_code = 200
+            resp.iter_content.side_effect = lambda size: [resp.text.encode("utf-8")]
             resp.headers = {"Content-Type": "text/html; charset=utf-8"}
             if url == "https://example.com/list.html":
                 resp.text = listing_html

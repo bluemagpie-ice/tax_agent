@@ -460,6 +460,7 @@
     <div class="modal-overlay" id="settings-modal">
         <div class="modal">
             <h3>⚙ 模型配置</h3>
+            <div id="settings-admin-config" hidden>
             <div class="section-title">LLM 对话模型</div>
             <label>提供商</label><select id="cfg-llm-provider" onchange="selectProvider('llm')"></select>
             <label>模型 ID（可自定义）</label><input id="cfg-llm-model" list="llm-models" placeholder="填写服务商提供的模型 ID"><datalist id="llm-models"></datalist>
@@ -475,7 +476,8 @@
             <label>向量数预警上限（可自定，0 表示不设数量上限）</label><input id="cfg-qdrant-limit" type="number" min="0" step="1" value="0">
             <button class="btn" onclick="refreshQdrant(this)">🔄 刷新</button><p id="cfg-qdrant-status" role="status"></p>
             <p style="font-size:12px;color:var(--text-dim)">刷新查询已保存的地址。空间仅估算向量正文，不含索引和文档；免费版按资源限制，无固定向量数上限。切换地址不迁移数据；Embedding 必须与集合维度一致。</p>
-            <label>访问 Token（填写服务端配置的凭证）</label><input id="cfg-auth-token" type="password" autocomplete="off"><button class="btn" onclick="applyAccessToken()">验证并应用访问 Token</button>
+            </div>
+            <label for="cfg-auth-token">访问 Token（填写服务端配置的凭证）</label><input id="cfg-auth-token" type="password" autocomplete="off"><button class="btn" onclick="applyAccessToken()">验证并应用访问 Token</button>
             <p style="font-size:12px;color:var(--text-dim)">模型设置对当前服务所有会话生效；API Key 留空保留原值。</p>
             <div class="section-title" style="border-top:1px solid var(--border);padding-top:14px;margin-top:14px">🔑 身份认证 Token</div>
             <label>普通用户 Token</label><input id="cfg-user-token" type="password" autocomplete="off" placeholder="填写服务端配置的普通用户 Token">
@@ -778,7 +780,8 @@
         async function regenerate(assistantWrap) {
             const q = lastUserQuery(), sid = currentSessionId, token = AUTH_TOKEN;
             const revision = retractions.get(sid)?.revision;
-            if (!q || !Number.isInteger(revision) || !retractions.get(sid)?.can_retract
+            const lastAssistant = [...chatInner.querySelectorAll('.message.assistant')].at(-1);
+            if (assistantWrap !== lastAssistant || !q || !Number.isInteger(revision) || !retractions.get(sid)?.can_retract
                 || sessionStreams.has(sid) || retractingSessions.has(sid) || pendingWorkflow) {
                 showToast('请刷新对话后重新生成最后一轮回复', true); return;
             }
@@ -1364,6 +1367,7 @@
                 document.getElementById('cfg-llm-key').value = '';
                 document.getElementById('cfg-llm-url').value = cfg.llm.base_url;
                 savedSettings = cfg;
+                document.getElementById('settings-admin-config').hidden = false;
                 showKeyState();
                 status.textContent = '';
                 disableSettingsInputs(false);
@@ -1440,6 +1444,7 @@
             document.getElementById('cfg-admin-token').placeholder = getTokenForRole('admin') || DEFAULT_ADMIN_TOKEN;
             document.getElementById('cfg-current-role').textContent = currentRole === 'admin' ? '🛡️ 管理员' : '👤 普通用户';
             savedSettings = null;
+            document.getElementById('settings-admin-config').hidden = true;
             disableSettingsInputs(true);
             document.getElementById('settings-save').disabled = true;
             document.getElementById('settings-save-status').textContent = '正在读取已保存配置…';

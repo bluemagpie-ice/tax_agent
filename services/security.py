@@ -13,6 +13,8 @@
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+
+read_only_retrieval = ContextVar("read_only_retrieval", default=False)
 from typing import Any, Dict, Optional
 import logging
 import re
@@ -38,6 +40,17 @@ def collect_answer_sources(records: list[dict]) -> list[dict]:
             if record not in sources:
                 sources.append(record)
     return visible
+
+
+def redact_identifiers(text: str) -> str:
+    """Mask direct identifiers without changing substantive claims."""
+    text = re.sub(r"(?<![A-Za-z0-9])\d{17}[\dXx](?![A-Za-z0-9])", "[身份标识已脱敏]", text)
+    text = re.sub(r"(?<!\d)1[3-9]\d{9}(?!\d|(?:\.\d+)?\s*(?:元|万元|亿元))", "[手机号已脱敏]", text)
+    text = re.sub(r"((?:税号|纳税人识别号|统一社会信用代码|银行卡号|银行账号)\s*[：:=]?\s*)[A-Za-z0-9]{15,22}(?![A-Za-z0-9])", r"\1[标识已脱敏]", text)
+    for name, value in os.environ.items():
+        if name.endswith(("API_KEY", "AUTH_USER_TOKEN", "AUTH_ADMIN_TOKEN", "DEVELOPER_TOKEN")) and len(value) >= 8:
+            text = text.replace(value, "[密钥已脱敏]")
+    return text
 
 
 def check_answer(text: str, sources: list[dict] | None = None, *, citation_details=False, allow_nonfiling=False) -> tuple[str, dict]:
@@ -87,12 +100,7 @@ def check_answer(text: str, sources: list[dict] | None = None, *, citation_detai
         issues.append("unsafe_tax_advice")
         text = "合规校验拦截了可能涉及违法或无依据保证的税务建议。请按真实业务记录收入和发票，并结合政策原文由财税人员核对申报条件。"
     original = text
-    text = re.sub(r"(?<![A-Za-z0-9])\d{17}[\dXx](?![A-Za-z0-9])", "[身份标识已脱敏]", text)
-    text = re.sub(r"(?<!\d)1[3-9]\d{9}(?!\d|(?:\.\d+)?\s*(?:元|万元|亿元))", "[手机号已脱敏]", text)
-    text = re.sub(r"((?:税号|纳税人识别号|统一社会信用代码|银行卡号|银行账号)\s*[：:=]?\s*)[A-Za-z0-9]{15,22}(?![A-Za-z0-9])", r"\1[标识已脱敏]", text)
-    for name, value in os.environ.items():
-        if name.endswith(("API_KEY", "AUTH_USER_TOKEN", "DEVELOPER_TOKEN")) and len(value) >= 8:
-            text = text.replace(value, "[密钥已脱敏]")
+    text = redact_identifiers(text)
     if text != original:
         issues.append("sensitive_identifier")
     report = {"ok": not issues, "issues": issues, "citation_checks": len(list(re.finditer(number_pattern, original_answer))) + len(list(re.finditer(article_pattern, original_answer))),

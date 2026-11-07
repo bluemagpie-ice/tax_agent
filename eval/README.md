@@ -17,10 +17,10 @@
 python -m eval.run_eval --mode intent
 
 # 2. 完整评测（需要 .env 里的 LLM + Qdrant 已配置，且知识库已灌入数据）
-python -m eval.run_eval --mode all
+python -m eval.run_eval --mode all --live
 
 # 3. 指定评测对象 / 导出 JSON
-python -m eval.run_eval --agent knowledge_agent --mode answer --json report.json
+python -m eval.run_eval --agent knowledge_agent --mode answer --live --json report.json
 ```
 
 ## 三个指标的含义

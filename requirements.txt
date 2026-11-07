@@ -31,3 +31,6 @@ pypdf>=5,<7
 # OCR/图检索为可选能力；不影响文本知识库和联网问答启动。
 # OCR 需自行配置 PaddleOCR/PaddlePaddle 及扫描 PDF 所需的 Poppler。
 # Neo4j 仅在自行配置服务后启用。
+
+# OCR rendering helper (Poppler required separately for real PDFs)
+pdf2image>=1.17.0

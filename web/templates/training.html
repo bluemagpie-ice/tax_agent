@@ -322,7 +322,7 @@
                         <div style="font-size:12px; margin-top:4px;">来源：${sourceUrl ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(c.source_name || c.source_id)}</a>` : escapeHtml(c.source_name || c.source_id)}${sourceUrl ? '' : '（无网页链接）'}</div>
                         <div style="font-size:12px; color:#606266; margin:8px 0;">变更摘要：${escapeHtml(c.summary || '暂无变更摘要')}</div>
                         ${sourceUrl ? `<div style="font-size:12px; margin-bottom:8px;">信息来源：<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(sourceUrl)}</a></div>` : ''}
-                        <a href="#" data-key="${escapeHtml(encodeURIComponent(c.unique_key))}" onclick="loadDiff(decodeURIComponent(this.dataset.key), this);return false;" style="font-size:12px; color:#667eea;">查看变更详情 →</a>
+                        <button type="button" data-key="${escapeHtml(encodeURIComponent(c.unique_key))}" onclick="loadDiff(decodeURIComponent(this.dataset.key), this);return false;" style="font-size:12px; color:#667eea;">查看变更详情 →</button>
                         <pre id="diff-${i}" style="display:none; font-size:11px; background:#f5f7fa; padding:8px; margin-top:4px; border-radius:4px; overflow-x:auto;"></pre>
                     </div>`;
                 }).join('');

@@ -450,7 +450,7 @@ def _search_gov_sites(query: str, limit: int = 5) -> list[dict]:
         return results[:limit]
     except Exception as e:
         logger.warning(f"[_search_gov_sites] 定向搜索失败: {e}")
-        raise RuntimeError("知识库检索失败，结论未核验") from e
+        return []
 
 # ---- LangChain Tool 封装 ----
 

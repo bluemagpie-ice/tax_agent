@@ -13,6 +13,7 @@ class Element {
     remove() { if(this.parent) this.parent.childNodes = this.parent.childNodes.filter(n=>n!==this); }
     addEventListener() {} focus() {} dispatchEvent() {}
     get children() { return this.childNodes; }
+    get previousElementSibling() { const siblings=this.parent?.childNodes || []; return siblings[siblings.indexOf(this)-1]; }
     set innerHTML(s) { this.html=s; this.childNodes=[]; }
     get innerHTML() { return this.html; }
     set textContent(s) { this.text=s; }
@@ -22,6 +23,7 @@ class Element {
         const nodes = this.childNodes.flatMap(n=>[n,...n.querySelectorAll('*')]);
         if(selector === '*') return nodes;
         if(selector === '.message.user .bubble') return nodes.filter(n=>n.className==='bubble' && n.parent?.className==='message user');
+        if(selector === '.message.assistant') return nodes.filter(n=>n.className==='message assistant');
         if(selector.startsWith('.')) return nodes.filter(n=>n.className.split(' ').includes(selector.slice(1)));
         return [];
     }
@@ -96,6 +98,18 @@ async function feed(sid,event,text) {
     assert.equal(run('currentRole'),'admin');
     assert.equal(run('AUTH_TOKEN'),'Bearer stale');
     assert.equal(run('currentSessionId'),'admin-session');
+    const regenCalls=[];
+    context.fetch=async(url,options)=>{
+        regenCalls.push([url,options.method]);
+        return {ok:true,json:async()=>({revision:8,can_retract:false})};
+    };
+    run("currentSessionId='R';chatInner.replaceChildren();appendMessage('user','旧问题','R');let oldReply=appendMessage('assistant','旧回复','R').wrap;appendMessage('user','新问题','R');let lastReply=appendMessage('assistant','新回复','R').wrap;retractions.set('R',{revision:7,can_retract:true});sendMessage=async()=>{window.regenQuery=userInput.value};");
+    await run('regenerate(oldReply)');
+    assert.equal(regenCalls.length,0);
+    await run('regenerate(lastReply)');
+    assert.deepEqual(regenCalls,[['/api/conversations/R/messages/last?revision=7','DELETE']]);
+    assert.equal(context.window.regenQuery,'新问题');
+    assert.equal(element('chat-inner').childNodes.length,2);
     context.fetch=oldFetch;
     console.log('PASS: 双会话并行、后台流式隔离、历史切换、完整结果保留、侧栏动画、当前会话停止');
 })().catch(error=>{console.error(error);process.exitCode=1;});
