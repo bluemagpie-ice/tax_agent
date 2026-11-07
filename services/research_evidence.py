@@ -44,7 +44,8 @@ def normalize_evidence(record, *, kind="policy_rag"):
         "retrieved_at": utcnow(), "read_status": "read_excerpt" if content else "not_read",
         "truncated": bool(record.get("truncated")),
         "source_check": "official_domain" if official_url(url) else "unverified",
-        "validity_check": "unknown", "applicability_check": "unknown",
+        "validity_check": "superseded" if record.get("superseded_by") else record.get("validity_check", "unknown"), "applicability_check": "unknown",
+        "source_type": record.get("source_type", kind),
         "file_id": record.get("file_id"),
     }
 

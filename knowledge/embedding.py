@@ -245,6 +245,14 @@ class QdrantService:
         :param chunks: 文本块列表（含 metadata 字段）
         :param embeddings: 向量矩阵，与 chunks 列表对应
         """
+        if len(chunks) != len(embeddings):
+            raise ValueError("分块与向量数量不一致，未写入")
+        if chunks:
+            vectors = self.client.get_collection(self.COLLECTION_NAME).config.params.vectors
+            if isinstance(vectors, dict):
+                raise ValueError("当前集合使用命名向量，请先配置兼容的索引方案")
+            if any(len(vector) != vectors.size for vector in embeddings):
+                raise ValueError("Embedding 维度与现有集合不一致；保留现有数据，需另建集合或离线迁移")
         points = []
         for chunk, embedding in zip(chunks, embeddings):
             # payload = 固定字段 + 税务元数据（全部打平到顶层，方便 Qdrant Filter 查询）
@@ -374,6 +382,11 @@ class QdrantService:
             f"Qdrant 按 file_id='{file_id}' 删除了 {deleted_count} 条向量"
         )
         return deleted_count
+
+    def set_file_metadata(self, file_id: str, metadata: dict) -> None:
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        self.client.set_payload(collection_name=self.COLLECTION_NAME, payload=metadata,
+            points=Filter(must=[FieldCondition(key="file_id", match=MatchValue(value=file_id))]), wait=True)
 
     def delete_all_chunks(self):
         """
@@ -763,12 +776,14 @@ class PersistentDocumentStore:
 
     def add_chunks(self, chunks):
         with PersistentDocumentStore._lock:
-            before = len(PersistentDocumentStore._shared_chunks)
-            PersistentDocumentStore._shared_chunks.extend(chunks)
+            previous = list(PersistentDocumentStore._shared_chunks)
+            by_id = {chunk.id: chunk for chunk in previous}
+            by_id.update({chunk.id: chunk for chunk in chunks})
+            PersistentDocumentStore._shared_chunks[:] = list(by_id.values())
             try:
                 self._save_to_file()
             except Exception:
-                PersistentDocumentStore._shared_chunks[before:] = []
+                PersistentDocumentStore._shared_chunks[:] = previous
                 raise
 
     def get_chunks(self) -> list:
@@ -1003,10 +1018,16 @@ class EmbeddingService:
 
         response = None
         if missing_texts:
-            response = client.embeddings.create(
-                model=model_name,
-                input=missing_texts,
-            )
+            from types import SimpleNamespace
+            vectors = []
+            batch_size = max(1, min(128, int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))))
+            for start in range(0, len(missing_texts), batch_size):
+                batch = missing_texts[start:start + batch_size]
+                part = client.embeddings.create(model=model_name, input=batch)
+                if len(part.data) != len(batch):
+                    raise ValueError("Embedding 服务返回向量数量不完整")
+                vectors.extend(sorted(part.data, key=lambda item: item.index))
+            response = SimpleNamespace(data=vectors)
 
         dim = 0
         if missing_texts and response is not None and response.data:
@@ -1144,10 +1165,8 @@ class EmbeddingService:
                 if idx < len(chunks) and scores[idx] > 0
             ]
         except Exception as e:
-            if self.qdrant_read_only:
-                raise
-            logging.warning(f"语义检索失效: {e}")
-            return []
+            logging.warning("语义检索失效: %s", type(e).__name__)
+            raise RuntimeError("政策检索服务失败，结论未核验") from e
 
     def _bm25_search(self, query: str, limit: int) -> List[Tuple[str, float]]:
         """BM25 词法检索包装"""

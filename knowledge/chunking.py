@@ -170,7 +170,7 @@ def split_text(text: str, preset_id: str, file_id=None, chunk_size: int = 1024, 
         if not content.strip():
             continue
         chunks.append({
-            "id": str(uuid.uuid4()),
+            "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"tax-chunk:{file_id}:{preset_id}:{i}:{content}")),
             "content": content,
             "file_id": file_id,
             "chunk_index": i,
@@ -208,7 +208,8 @@ def _split_law_text(text: str, file_id, chunk_size: int, chunk_overlap: int) -> 
         return _fallback_split(text, file_id, chunk_size, chunk_overlap, "laws")
 
     # 按标记位置切分
-    chunks_raw: list[str] = []
+    preamble = text[:markers[0].start()].strip()
+    chunks_raw: list[str] = [preamble] if preamble else []
     for idx, m in enumerate(markers):
         start = m.start()
         end = markers[idx + 1].start() if idx + 1 < len(markers) else len(text)
@@ -222,7 +223,7 @@ def _split_law_text(text: str, file_id, chunk_size: int, chunk_overlap: int) -> 
     for seg in chunks_raw:
         if len(seg) <= chunk_size:
             final_chunks.append({
-                "id": str(uuid.uuid4()),
+                "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"tax-chunk:{file_id}:laws:{chunk_index}:{seg}")),
                 "content": seg,
                 "file_id": file_id,
                 "chunk_index": chunk_index,
@@ -238,12 +239,16 @@ def _split_law_text(text: str, file_id, chunk_size: int, chunk_overlap: int) -> 
                 separators=["\n\n", "\n", "。", "！", "？", "；", ", ", ""],
             )
             sub_parts = sub_splitter.split_text(seg)
+            article = _re.match(r"第[一二三四五六七八九十百千万0-9]+条", seg)
             for part in sub_parts:
                 if not part.strip():
                     continue
+                content = part.strip()
+                if article and not content.startswith(article.group()):
+                    content = article.group() + "（续）\n" + content
                 final_chunks.append({
-                    "id": str(uuid.uuid4()),
-                    "content": part.strip(),
+                    "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"tax-chunk:{file_id}:laws:{chunk_index}:{content}")),
+                    "content": content,
                     "file_id": file_id,
                     "chunk_index": chunk_index,
                     "preset_id": "laws",
@@ -251,6 +256,8 @@ def _split_law_text(text: str, file_id, chunk_size: int, chunk_overlap: int) -> 
                 chunk_index += 1
 
     logging.info(f"[laws chunking] 按条文结构切分完成：{len(final_chunks)} 个分块")
+    for chunk in final_chunks:
+        chunk["articles"] = _re.findall(r"第[一二三四五六七八九十百千万0-9]+条", chunk["content"])
     return final_chunks
 
 
@@ -268,7 +275,7 @@ def _fallback_split(text: str, file_id, chunk_size: int, chunk_overlap: int, pre
         if not content.strip():
             continue
         out.append({
-            "id": str(uuid.uuid4()),
+            "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"tax-chunk:{file_id}:{preset_id}:{i}:{content}")),
             "content": content,
             "file_id": file_id,
             "chunk_index": i,

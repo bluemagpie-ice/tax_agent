@@ -29,9 +29,10 @@ def extract_query_date(text: str, today: Optional[date] = None) -> Optional[str]
     if not text:
         return None
     today = today or date.today()
+    text = re.sub(r"(?:公告|财税|税总发)\s*[〔\[（(]?\s*\d{4}\s*[〕\]）)年]?\s*第?\s*\d+\s*号", "", text)
 
     # 1. 完整日期：YYYY-MM-DD
-    full_date = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    full_date = re.search(r"(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})日?", text)
     if full_date:
         y, m, d = map(int, full_date.groups())
         try:
@@ -74,7 +75,7 @@ def extract_query_date(text: str, today: Optional[date] = None) -> Optional[str]
             if 1 <= m <= 12:
                 d = _last_day_of_month(y, m)
                 return f"{y:04d}-{m:02d}-{d:02d}"
-        return f"{y:04d}-12-31"
+        return today.isoformat()
 
     # 6. 相对时间：上个月
     if re.search(r"上个?月", text):

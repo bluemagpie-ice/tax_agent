@@ -62,10 +62,7 @@ def search_tax_policy(
 
         # 组装 Qdrant 过滤条件
         filters: dict = {}
-        if tax_type:
-            filters["tax_type"] = tax_type
-        if is_current is not None:
-            filters["is_current"] = is_current
+        # Legal metadata on historical chunks may be missing. Preferences are soft.
 
         cache_key = (current_tenant_id(), document_session.get(), query.strip(), tax_type or "", limit, is_current, research,
                      ConfigManager().get_embedding_config()["model"])
@@ -82,6 +79,7 @@ def search_tax_policy(
         enhanced = query if research else f"税法 政策 条文 {query}"
         results = svc.search(enhanced, limit=limit, mode="semantic" if research else "rrf", filters=filters or None)
 
+        results.sort(key=lambda item: (item.get("score", 0), item.get("tax_type") == tax_type, item.get("is_current") is is_current), reverse=True)
         # 格式化输出
         formatted = []
         for r in results:
@@ -108,7 +106,7 @@ def search_tax_policy(
         if research:
             raise
         logger.error(f"[search_tax_policy] 检索失败: {e}", exc_info=True)
-        return []
+        raise RuntimeError("知识库检索失败，结论未核验") from e
 
 # ---- LangChain Tool 封装 ----
 
@@ -135,7 +133,10 @@ try:
         limit: int = 5,
         is_current: Optional[bool] = None,
     ) -> str:
-        results = search_tax_policy(query, tax_type=tax_type, limit=limit, is_current=is_current)
+        try:
+            results = search_tax_policy(query, tax_type=tax_type, limit=limit, is_current=is_current)
+        except RuntimeError:
+            return json.dumps({"status":"error", "found":0, "message":"政策检索失败，结论未核验，请稍后重试"}, ensure_ascii=False)
         if not results:
             return json.dumps({"found": 0, "message": "知识库中未检索到相关条文"}, ensure_ascii=False)
 
@@ -449,7 +450,7 @@ def _search_gov_sites(query: str, limit: int = 5) -> list[dict]:
         return results[:limit]
     except Exception as e:
         logger.warning(f"[_search_gov_sites] 定向搜索失败: {e}")
-        return []
+        raise RuntimeError("知识库检索失败，结论未核验") from e
 
 # ---- LangChain Tool 封装 ----
 

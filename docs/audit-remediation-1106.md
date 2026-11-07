@@ -58,30 +58,30 @@
 | P1-10 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
 | P1-11 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
 | P1-12 | P1 | 已确认并修复 | web/templates/index.html; tests/test_conversation_ui.js | 401 不切身份或 Token；会话存储按角色；独立访问凭证恢复按钮 | 需真实浏览器验收 |
-| P1-2 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
-| P1-3 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
-| P1-4 | P1 | 已确认但暂未修复 | agents/research_agent.py | Research 入选优先关联题目及分数；普通聊天 RAG 日期排序待阶段4 | 尚未消除全链路风险 |
+| P1-2 | P1 | 已确认并修复 | services/policy_metadata.py; knowledge/kb.py; services/tools/kb_tools.py | 显式元数据抽取+未知效力；历史缺字段不硬过滤；Research透传状态 | 生产历史payload未检查；法律时效仍须核验 |
+| P1-3 | P1 | 已确认并修复 | knowledge/policy_updater.py; knowledge/embedding.py | 新版成功后旧file_id标记 superseded，保留旧块审计；失败可重试 | 未回溯标记生产历史重复版本 |
+| P1-4 | P1 | 已确认并修复 | agents/knowledge_agent.py; agents/sub_agents/rag_sub_agent.py; agents/research_agent.py | 相关分数优先；日期仅次序判定；Research按问题关联筛选 | 最低分阈值未校准，不宣称检索质量验收 |
 | P1-5 | P1 | 已确认并修复 | services/policy_validity.py; agents/research_agent.py | 期间区间判断，起始无终止标待核对；文号年份不通过 | 不做法律效力自动保证；区间解析只覆盖显式年份/日期 |
 | P1-6 | P1 | 已确认并修复 | agents/research_agent.py; agents/streaming.py | 相关度排序、选集变更才评估、保留已充分题目、裁剪警告、Research 独立窗口环境变量 | 真实模型相关度与小窗口验收待执行 |
 | P1-7 | P1 | 已确认并修复 | agents/research_agent.py; services/security.py | 预留报告与一次修正调用及token；按question_id；具体错误；敏感字段脱敏；有据非申报分析不误拦 | 联合文号及全报告字段脱敏还需专项覆盖 |
 | P1-8 | P1 | 已确认并修复 | agents/research_agent.py; web/static/research.js | 瞬时模型/结构失败保留状态从失败节点恢复；其他失败明确从头执行 | 预算耗尽须重新研究；取消的线程调用不能强杀 |
-| P1-9 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
+| P1-9 | P1 | 已确认并修复 | knowledge/embedding.py; services/tools/kb_tools.py | 故障向上传递，Tool返回status=error且结论未核验 | 真实外部故障未做网络验收 |
 | RAG-001 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | RAG-002 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | RAG-003 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | RAG-004 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| RAG-005 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| RAG-005 | P2/P3（依报告） | 已确认并修复 | agents/*agent.py | 相关性优先，不让新日期覆盖相关度 | 最低分阈值待真实数据校准 |
 | RAG-006 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | RAG-007 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| RAG-008 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| RAG-009 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| RAG-008 | P2/P3（依报告） | 已确认并修复 | knowledge/chunking.py; knowledge/kb.py; knowledge/embedding.py | 确定性chunk id；同file_id复用记录；store按id upsert | 旧版随机chunk尚未清理 |
+| RAG-009 | P2/P3（依报告） | 已确认并修复 | knowledge/kb.py; knowledge/embedding.py | 先uploading，落盘成功后云端激活，失败保持不可检索 | 跨进程与崩溃窗口仍需长期并发验收 |
 | RAG-010 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | RAG-011 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| RAG-012 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| RAG-013 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| RAG-012 | P2/P3（依报告） | 已确认并修复 | knowledge/chunking.py; knowledge/kb.py | 保留前言、长条文续块条号、payload chunk_index/articles | 旧向量不重建 |
+| RAG-013 | P2/P3（依报告） | 已确认并修复 | services/tools/date_extractor.py | 完整中文日期、今年为今天、去除公告文号年份 | 复杂自然语言时间仍需模型/人工确认 |
 | RAG-014 | P2/P3（依报告） | 待人工确认 | — | 尚未完成 | 未消除 |
 | RAG-015 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| RAG-016 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| RAG-016 | P2/P3（依报告） | 已确认但暂未修复 | knowledge/embedding.py; services/config_manager.py | Embedding分批、数量/维度校验；禁止已有配置直接换模型 | 历史集合无模型指纹，完整模型/集合身份验证未完成 |
 | RAG-017 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | RAG-018 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | RAG-019 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
@@ -153,3 +153,11 @@ P0-2/3/4 已确认代码问题；修改完成，正在运行隔离回归。旧�
 旧测试把“2023起施行就不适用2026”当作预期，已改为明确 is_current=False 的失效证据，并新增开放起始期间 pending_verification 回归。
 
 阶段2 checkpoint：e7b4ac7。RESEARCH_CONTEXT_WINDOW / RESEARCH_MAX_OUTPUT_TOKENS 可独立设置，默认沿用聊天预算；不擅自放大真实模型上下文。
+
+### 阶段 4（新写入链路完成，历史数据迁移未执行）
+
+RAG/入库/分块/政策更新定向：55 passed，0 failed，0 skipped。其中 Qdrant `:memory:` 为真实本地引擎，Embedding为固定向量替身；验证同文件重复入库记录与向量数不增长。政策更新使用Mock云端，断言旧file_id标失效/被替代。生产云端与真实Embedding未连接。
+
+未执行删除、去重、迁移或重建。旧payload缺效力仍为unknown；若需补齐旧数据，应先导出只读快照、生成差异清单，经人工确认后逐file_id补元数据。不得基于文号年份、发布日期推断生效日。
+
+阶段3 checkpoint：fa230ff。

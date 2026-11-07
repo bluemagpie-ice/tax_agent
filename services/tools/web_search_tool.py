@@ -88,7 +88,7 @@ def search_and_ingest_web(
                     "source_type": "web_search",
                     "title": chunk["title"],
                     "url": chunk.get("url", ""),
-                    "is_current": True,
+                    "is_current": None,
                     "owner_id": current_tenant_id(),
                     "scope": "session" if document_session.get() else "global",
                     "session_id": document_session.get(),

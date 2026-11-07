@@ -221,7 +221,13 @@ class QdrantKnowledgeBase(KnowledgeBase):
                   "file_path": file_path, "chunk_count": 0, "status": "uploading",
                   "managed_upload": kwargs.get("managed_upload", False),
                   "tax_metadata": {key: kwargs[key] for key in ("owner_id", "scope", "session_id", "source_type") if key in kwargs}}
-        self._metadata.setdefault("files", []).append(record)
+        files = self._metadata.setdefault("files", [])
+        existing = next((item for item in files if item["file_id"] == file_id), None)
+        if existing:
+            existing.update(record)
+            record = existing
+        else:
+            files.append(record)
         blocked_document_ids.add(file_id)
         self.save_metadata()
         try:
@@ -231,8 +237,16 @@ class QdrantKnowledgeBase(KnowledgeBase):
                 self.save_metadata()
                 return result
             record["status"] = "active"
-            blocked_document_ids.discard(file_id)
             self.save_metadata()
+            embedding = self._ensure_embedding()
+            if embedding.qdrant is not None:
+                await asyncio.to_thread(embedding.qdrant.set_file_metadata, file_id, {"status": "active"})
+            for chunk in embedding.store.get_chunks():
+                if chunk.file_id == file_id:
+                    chunk.metadata["status"] = "active"
+            record["tax_metadata"]["status"] = "active"
+            self.save_metadata()
+            blocked_document_ids.discard(file_id)
             from services.tools.kb_tools import _search_cache
             _search_cache.clear()
             return result
@@ -265,17 +279,19 @@ class QdrantKnowledgeBase(KnowledgeBase):
         chunk_overlap = kwargs.get("chunk_overlap", 128)
         file_id = kwargs.get("file_id") or f"file_{int(time.time())}"
         # ---- 收集税务元数据（可选，会被打平写入 Qdrant payload）----
-        tax_metadata: dict = {}
+        from services.policy_metadata import extract_policy_metadata
+        tax_metadata: dict = extract_policy_metadata(markdown_text)
         for key in ("tax_type", "document_number", "issuer", "effective_date",
                     "law_type", "is_current", "title", "source_type",
                     "expiry_date", "superseded_by", "owner_id", "scope", "session_id", "file_name",
-                    "source_url", "url", "publish_date", "published_date", "region", "articles"):
+                    "source_url", "url", "publish_date", "published_date", "region", "articles", "validity_check"):
             val = kwargs.get(key)
             if val is not None and val != "":
                 tax_metadata[key] = val
         # 若外部未传 source_type，默认标记为 user_upload（安全兜底）
         if "source_type" not in tax_metadata:
             tax_metadata["source_type"] = "user_upload"
+        tax_metadata["status"] = "uploading"
 
 
         chunks = split_text(
@@ -288,8 +304,10 @@ class QdrantKnowledgeBase(KnowledgeBase):
 
         # 写入 store 并触发向量化
         embedding = await asyncio.to_thread(self._ensure_embedding)
+        tax_metadata["embedding_model"] = getattr(embedding, "embedding_model", "unknown")
         documents = [
-            ChunkDocument(id=c["id"], content=c["content"], file_id=c["file_id"], metadata=tax_metadata)
+            ChunkDocument(id=c["id"], content=c["content"], file_id=c["file_id"],
+                          metadata={**tax_metadata, "chunk_index": c["chunk_index"], "articles": c.get("articles", [])})
             for c in chunks
         ]
         await asyncio.to_thread(embedding.add_chunks, documents)

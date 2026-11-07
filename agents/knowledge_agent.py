@@ -137,6 +137,7 @@ class KnowledgeAgent(BaseAgent):
 
             raw_results.sort(
                 key=lambda x: (
+                    x.get("score", 0),
                     0 if (x.get("is_current") is False or x.get("superseded_by")) else 1,
                     x.get("effective_date") or "",
                 ),
@@ -151,6 +152,8 @@ class KnowledgeAgent(BaseAgent):
             context_parts = []
             for i, item in enumerate(results, 1):
                 extra = ""
+                if item.get("is_current") is None:
+                    context_parts.append("注：政策效力未知，结论尚未核验")
                 if item.get("is_current") is False or item.get("superseded_by"):
                     sup = item.get("superseded_by", "")
                     extra = (
@@ -165,7 +168,7 @@ class KnowledgeAgent(BaseAgent):
 
         except Exception as e:
             logger.error(f"[RAG检索] 失败: {e}")
-            return "（知识库检索暂时不可用）"
+            return "（知识库检索失败，结论未核验；请稍后重试）"
 
 
     # ==================== 节点方法 ====================

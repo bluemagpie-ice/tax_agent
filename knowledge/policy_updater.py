@@ -606,6 +606,11 @@ class PolicyTracker:
             )
             self._conn.commit()
 
+    def file_id_for(self, unique_key: str) -> str:
+        with self._lock:
+            row = self._conn.execute("SELECT file_id FROM policy_record WHERE unique_key=?", (unique_key,)).fetchone()
+            return (row[0] or "") if row else ""
+
     def mark_failed(self, unique_key: str) -> None:
         with self._lock:
             self._conn.execute(
@@ -1018,6 +1023,17 @@ class PolicyUpdater:
 
         if result.get("status") != "success" or result.get("chunk_count", 0) < 1:
             raise RuntimeError(result.get("message") or "政策入库未返回成功或有效分块")
+
+        previous_id = self.tracker.file_id_for(item.unique_key)
+        if previous_id and previous_id != file_id:
+            # Preserve all old chunks for audit; never delete/rebuild the collection.
+            replacement = {"is_current": False, "superseded_by": file_id, "validity_check": "superseded"}
+            kb._ensure_embedding().qdrant.set_file_metadata(previous_id, replacement)
+            for record in getattr(kb, "_metadata", {}).get("files", []):
+                if record.get("file_id") == previous_id:
+                    record.setdefault("tax_metadata", {}).update(replacement)
+            if hasattr(kb, "save_metadata"):
+                kb.save_metadata()
 
         item.metadata["file_id"] = file_id
         return result

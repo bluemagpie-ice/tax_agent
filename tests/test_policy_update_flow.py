@@ -18,7 +18,7 @@ from knowledge.policy_updater import (
 @pytest.fixture
 def pipeline(tmp_path, monkeypatch):
     calls = []
-    cloud = SimpleNamespace(qdrant=object())
+    cloud = SimpleNamespace(qdrant=SimpleNamespace(set_file_metadata=MagicMock()))
 
     async def ingest(path, **kwargs):
         calls.append((Path(path).read_text(encoding="utf-8"), kwargs))
@@ -52,10 +52,11 @@ def test_full_flow_change_diff_and_retry(pipeline, caplog):
     failed = updater.run_once()
     assert failed.failed == 1 and failed.ingested == 0 and "Qdrant" in failed.errors[0]
     assert not updater.tracker.exists(updater._sources[0].scan()[0])
-    cloud.qdrant = object()
+    cloud.qdrant = SimpleNamespace(set_file_metadata=MagicMock())
     changed = updater.run_once()
     assert changed.changed == changed.ingested == 1 and changed.duplicated == 0
     assert len(calls) == 2 and calls[0][1]["file_id"] != calls[1][1]["file_id"]
+    cloud.qdrant.set_file_metadata.assert_called_once_with(calls[0][1]["file_id"], {"is_current":False,"superseded_by":calls[1][1]["file_id"],"validity_check":"superseded"})
     assert calls[1][1]["source_type"] == "default" and calls[1][1]["scope"] == "system"
     diff = updater.tracker.get_change_diff(old.unique_key)
     assert diff["old_hash"] == old.content_hash and diff["old_snapshot_available"]

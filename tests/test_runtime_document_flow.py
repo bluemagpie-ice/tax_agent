@@ -83,7 +83,7 @@ def test_upload_browse_scopes_restart_and_delete(document_app):
     assert client.delete(f"/api/knowledge/files/{system_id}", headers=USER).status_code == 404
     assert client.get("/api/knowledge/files?include_system=true", headers=USER).status_code == 403
     assert "private session-only" in client.get(f"/api/knowledge/files/{session_id}/content", headers=USER).json()["content"]
-    assert client.get("/api/search?q=tax").status_code == 422
+    assert client.get("/api/search?q=tax").status_code == 401
     with tenant_scope("user_001"):
         token = document_session.set("one")
         try:

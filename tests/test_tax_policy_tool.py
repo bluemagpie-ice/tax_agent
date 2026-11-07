@@ -48,14 +48,14 @@ class TestSearchTaxPolicy:
         search_tax_policy("抵扣", tax_type="vat")
         patch_embedding.search.assert_called_once()
         called_kwargs = patch_embedding.search.call_args.kwargs
-        assert called_kwargs["filters"]["tax_type"] == "vat"
+        assert called_kwargs["filters"] is None  # Legacy unknown metadata must remain retrievable
 
     def test_is_current_filter(self, patch_embedding):
         """is_current=True 应当被组装进 filters"""
         search_tax_policy("优惠", is_current=True)
         patch_embedding.search.assert_called_once()
         called_kwargs = patch_embedding.search.call_args.kwargs
-        assert called_kwargs["filters"]["is_current"] is True
+        assert called_kwargs["filters"] is None  # Validity is a preference, never an inference
 
     def test_limit_pass_through(self, patch_embedding):
         """limit 参数应当原封不动透传给 EmbeddingService.search"""
@@ -106,8 +106,8 @@ class TestEmptyResult:
             "knowledge.embedding.EmbeddingService",
             side_effect=ConnectionError("Qdrant offline"),
         ):
-            results = search_tax_policy("任何查询")
-            assert results == []
+            with pytest.raises(RuntimeError, match="未核验"):
+                search_tax_policy("任何查询")
 
     def test_tool_handles_no_result(self):
         """Tool 层面：空列表要返回合法 JSON 而不是崩"""
@@ -120,3 +120,4 @@ class TestEmptyResult:
             data = json.loads(out)
             assert "found" in data
             assert data["found"] == 0
+            assert data["status"] == "error"

@@ -225,6 +225,8 @@ class ConfigManager:
                 continue
             old = self.get_llm_config() if section == "llm" else self.get_embedding_config()
             new_url = incoming.get("base_url") or old["base_url"]
+            if section == "embedding" and old["model"] and incoming.get("model", old["model"]) != old["model"] and self.get_qdrant_config()["url"]:
+                raise ValueError("已有向量配置时不能直接更换 Embedding 模型；请先为新模型配置独立集合并验证迁移")
             if not isinstance(new_url, str):
                 raise ValueError(f"{section}.base_url 必须是字符串")
             if new_url.strip().rstrip("/") != old["base_url"].rstrip("/"):

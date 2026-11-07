@@ -12,6 +12,7 @@ def test_policy_ingestion_preserves_official_provenance_without_inventing_effect
         captured.update(kwargs)
         return {'status':'success','chunk_count':1}
     updater=object.__new__(PolicyUpdater)
+    updater.tracker=SimpleNamespace(file_id_for=lambda key: "")
     updater.chunk_preset_id='general'
     item=PolicyItem(source_id='public',item_id='p1',title='公开资料',file_path=str(path),
                     url='https://www.chinatax.gov.cn/public',published_date='2024-01-01',
