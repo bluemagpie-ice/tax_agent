@@ -5,7 +5,11 @@ import socket
 from urllib.parse import urlsplit
 
 
-def validate_outbound_url(value: str, *, model=False, resolve_dns=True) -> str:
+class OutboundDNSFailure(ValueError):
+    pass
+
+
+def _outbound_addresses(value, *, model=False, resolve_dns=True, pin=False):
     url = urlsplit(value)
     if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password or url.fragment:
         raise ValueError("需要不含凭证的 HTTP(S) 地址")
@@ -19,22 +23,34 @@ def validate_outbound_url(value: str, *, model=False, resolve_dns=True) -> str:
         if entry.strip():
             item = urlsplit(entry.strip())
             allowed.add(f"{item.scheme}://{(item.hostname or '').lower()}:{item.port or (443 if item.scheme == 'https' else 80)}")
-    if model and origin in allowed:
-        return value
-    if model and url.scheme != "https":
+    trusted = model and origin in allowed
+    if trusted and not pin:
+        return []
+    if model and url.scheme != "https" and not trusted:
         raise ValueError("模型服务需使用 HTTPS；本地服务须由管理员在环境变量中显式允许该 origin")
     try:
         addresses = [ipaddress.ip_address(url.hostname)]
     except ValueError:
         if not resolve_dns:
-            return value
+            return []
         try:
             addresses = [ipaddress.ip_address(row[4][0]) for row in socket.getaddrinfo(url.hostname, port, type=socket.SOCK_STREAM)]
         except OSError as exc:
-            raise ValueError("无法解析服务地址") from exc
-    if not addresses or any(not address.is_global for address in addresses):
+            raise OutboundDNSFailure("无法解析服务地址") from exc
+    if not addresses or (not trusted and any(not address.is_global or address.is_multicast for address in addresses)):
         raise ValueError("禁止访问内网、环回、链路本地及保留地址")
+    return addresses
+
+
+def validate_outbound_url(value: str, *, model=False, resolve_dns=True) -> str:
+    _outbound_addresses(value, model=model, resolve_dns=resolve_dns)
     return value
+
+
+def resolve_model_address(value: str) -> str:
+    addresses = _outbound_addresses(value, model=True, pin=True)
+    # Prefer IPv4 when both families are advertised on hosts without IPv6 egress.
+    return str(min(addresses, key=lambda address: address.version))
 
 
 def fetch_policy_response(session, url, timeout=30, limit=2 * 1024 * 1024):

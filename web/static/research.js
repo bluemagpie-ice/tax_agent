@@ -39,8 +39,8 @@
         };
     }
     async function api(path, body, signal) {
-        const response = await fetch('/api/research' + path, {method:body ? 'POST':'GET',
-            headers:{Authorization:AUTH_TOKEN, 'Content-Type':'application/json'}, body:body ? JSON.stringify(body):undefined, signal});
+        const response = await TaxAuth.request('/api/research' + path, {method:body ? 'POST':'GET',
+            headers:{'Content-Type':'application/json'}, body:body ? JSON.stringify(body):undefined, signal});
         if(!response.ok) { const data=await response.json().catch(() => ({})); throw new Error(typeof data.detail === 'string' ? data.detail : '请求失败，请刷新后重试'); }
         return response;
     }
@@ -179,15 +179,16 @@
     }
     async function action(fn) {
         if(busy) return;
-        const auth=AUTH_TOKEN;
+        const auth=TaxAuth.snapshot();
         setBusy(true); el('research-error').textContent=''; statusAt=Date.now();
         if(typeof setInterval === 'function') timer=setInterval(() => {if(task) renderStatus();},1000);
         try {await fn();}
         catch(error) {
+            if(auth !== TaxAuth.snapshot()) return;
             el('research-error').textContent=error.name === 'AbortError' ? '执行已停止，正在读取保存状态。' : error.message;
-            if(task && auth===AUTH_TOKEN) {
+            if(task) {
                 try { task=await (await api(`/tasks/${task.task_id}`)).json(); render(); await list(); }
-                catch { el('research-error').textContent+=' 无法读取保存状态，请稍后刷新。'; }
+                catch { if(auth === TaxAuth.snapshot()) el('research-error').textContent+=' 无法读取保存状态，请稍后刷新。'; }
             }
         }
         finally {if(timer !== null) clearInterval(timer); timer=null; controller=null; setBusy(false);}
@@ -255,7 +256,15 @@
         manualSave.onclick=() => action(async () => {await api('/cases',{content:manual()}); await loadCases();});
     }
     resetManual();
-    window.addEventListener('tax-auth-changed',() => {controller?.abort(); task=null; el('research-query').value=''; el('research-result').replaceChildren(); el('research-cases').replaceChildren(); resetManual(); render();});
+    window.addEventListener('tax-auth-changed',() => {
+        controller?.abort(); task=null;
+        el('research-query').value='';
+        el('research-error').textContent='';
+        el('research-task-list').replaceChildren(new Option('新建研究任务',''));
+        el('research-result').replaceChildren(); el('research-cases').replaceChildren();
+        resetManual(); render();
+        if(TaxAuth.user() && !el('research-panel').hidden) action(async () => {await list(); await loadCases();});
+    });
     el('research-form').onsubmit=event => {event.preventDefault(); action(async () => {
         const input=el('research-query');
         if(!input.value.trim() || input.value.length > 16000) {input.setAttribute('aria-invalid','true'); input.focus(); throw new Error('请输入不超过16000字的研究问题。');}

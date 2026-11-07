@@ -4,25 +4,41 @@ python -m tests.research_ui_server
 This server is not a deployment or a tax-answer demonstration.
 """
 import json
+import os
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from sqlalchemy import create_engine
 from starlette.responses import FileResponse
 from starlette.staticfiles import StaticFiles
 
+ROOT = Path(__file__).resolve().parents[1]
+TEMP = ROOT / '.test_runs' / ('research-ui-fixture-' + uuid.uuid4().hex)
+TEMP.mkdir(parents=True)
+os.environ.update(
+    PYTHON_DOTENV_DISABLED="1",
+    DATABASE_URL=f"sqlite:///{(TEMP / 'business.sqlite').as_posix()}",
+    TAX_AGENT_DATA_DIR=str(TEMP / "data"),
+    TAX_AGENT_UPLOAD_DIR=str(TEMP / "uploads"),
+    AUTH_USER_TOKEN="test_token_123",
+    DEVELOPER_TOKEN="admin_token_456",
+    AUTH_SESSION_SECRET="ui-fixture-signing-key",
+    TAX_AGENT_MODEL_ALLOWED_ORIGINS="http://127.0.0.1:8767",
+)
+
 from agents.research_agent import ResearchAgent
+from database.models import create_tables
 from eval.research_eval import SmokeModel, SnapshotTools
 from services.research_store import ResearchStore
-from services.security import tenant_scope
+from web.main import (
+    get_current_user, get_personal_settings, login, me, test_personal_connection, update_personal_settings,
+)
 from web.research_routes import build_router
 
-ROOT = Path(__file__).resolve().parents[1]
-TEMP = ROOT / '.test_runs' / 'research-ui-fixture'
-TEMP.mkdir(parents=True, exist_ok=True)
 
 
 class UIModel(SmokeModel):
@@ -49,16 +65,9 @@ class UIModel(SmokeModel):
         return AIMessage(content=json.dumps(result, ensure_ascii=False))
 
 
-async def auth(authorization: str = Header(...)):
-    identities = {'Bearer test_token_123':'ui-alice','Bearer admin_token_456':'ui-bob'}
-    if authorization not in identities:
-        raise HTTPException(401,'UI fixture credential required')
-    with tenant_scope(identities[authorization]):
-        yield
-
-
 @asynccontextmanager
 async def lifespan(app):
+    create_tables()
     engine = create_engine(f"sqlite:///{TEMP / 'business.sqlite'}", connect_args={'check_same_thread':False})
     tools = SnapshotTools(json.loads((ROOT / 'eval/research/policy_snapshot.json').read_text(encoding='utf-8'))['records'])
     async with AsyncSqliteSaver.from_conn_string(str(TEMP / 'checkpoints.sqlite')) as saver:
@@ -71,7 +80,12 @@ async def lifespan(app):
 
 app = FastAPI(lifespan=lifespan)
 app.mount('/static',StaticFiles(directory=ROOT / 'web/static'))
-app.include_router(build_router(auth,lambda:app.state.agent))
+app.include_router(build_router(get_current_user,lambda:app.state.agent))
+app.add_api_route('/api/auth/login', login, methods=['POST'])
+app.add_api_route('/api/me', me, methods=['GET'])
+app.add_api_route('/api/settings/personal', get_personal_settings, methods=['GET'])
+app.add_api_route('/api/settings/personal', update_personal_settings, methods=['PUT'])
+app.add_api_route('/api/settings/personal/connection', test_personal_connection, methods=['POST'])
 
 
 @app.get('/')
@@ -80,18 +94,30 @@ async def home():
 
 
 @app.get('/api/conversations')
-async def conversations():
-    return {'sessions':[]}
+async def conversations(user=Depends(get_current_user)):
+    return {'conversations': []}
 
 
-@app.get('/api/me')
-async def me():
-    return {'id':'ui-alice','user_name':'隔离界面测试','role':'user'}
+@app.post('/fixture/v1/chat/completions')
+async def provider(request: Request):
+    if request.headers.get('Authorization') != 'Bearer ui-model-key':
+        raise HTTPException(401, 'UI provider rejected test key')
+    body = await request.json()
+    return {'model': body['model'], 'choices': [
+        {'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': 'OK'}},
+    ]}
 
 
 @app.get('/api/settings')
-async def settings():
-    return {'llm':{'model':'scripted-ui-fixture','api_key_set':False},'model_providers':[]}
+async def settings(user=Depends(get_current_user)):
+    from services.config_manager import MODEL_PROVIDERS
+
+    if user.role != 'admin':
+        raise HTTPException(403, '需要管理员权限')
+    return {'config': {'llm': {'provider': '自定义', 'model': 'scripted-ui-fixture',
+                              'base_url': 'https://provider.example/v1/', 'api_key_set': False},
+                       'qdrant': {'url': '', 'api_key_set': False, 'vector_limit': 0}},
+            'providers': MODEL_PROVIDERS}
 
 
 if __name__ == '__main__':

@@ -1,4 +1,5 @@
 """政策流水线回归：真实扫描/SQLite/调度，云端入库和 HTTP 故障使用可控替身。"""
+from tests.auth_helpers import ADMIN_BEARER
 import logging
 import sqlite3
 import threading
@@ -248,7 +249,7 @@ def test_changes_api_accepts_windows_path(pipeline, monkeypatch):
     monkeypatch.setenv("AUTH_USER_TOKEN", "test_token_123")
     key = updater.tracker.get_changes()[0]["unique_key"]
     client = TestClient(main.app)
-    response = client.get("/api/policy/changes/" + quote(key, safe=""), headers={"Authorization": "Bearer admin_token_456"})
+    response = client.get("/api/policy/changes/" + quote(key, safe=""), headers={"Authorization": ADMIN_BEARER})
     assert response.status_code == 200
     assert response.json()["unique_key"] == key and "-旧正文\n+新正文" in response.json()["diff"]
     assert client.get("/api/policy/changes/" + quote(key, safe=""), headers={"Authorization": "Bearer invalid-token"}).status_code == 401

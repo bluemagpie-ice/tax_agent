@@ -1,4 +1,5 @@
 """真实 LangGraph + 临时 SQLite；可控模型验收分支、边界及恢复，不替代真实模型实测。"""
+from tests.auth_helpers import USER_BEARER
 import asyncio
 import json
 from types import SimpleNamespace
@@ -189,7 +190,7 @@ def test_approval_api_requires_real_boolean_and_owned_session(tmp_path, monkeypa
     memory.get_session.return_value = None
     monkeypatch.setattr(main, "conversation_memory", memory)
     client = TestClient(main.app)
-    headers = {"Authorization": "Bearer test_token_123"}
+    headers = {"Authorization": USER_BEARER}
     assert client.post("/api/conversations/private/resume", headers=headers,
                        json={"id": "pause", "value": "yes"}).status_code == 422
     assert client.post("/api/conversations/private/resume", headers=headers,

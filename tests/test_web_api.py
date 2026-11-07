@@ -10,6 +10,7 @@ T12 — FastAPI 应用启动 & 基础路由测试
   6. POST /api/chat 带正确 Token → 200 + TaxQueryResponse
 """
 
+from tests.auth_helpers import USER_BEARER, ADMIN_BEARER
 import sys
 from unittest.mock import AsyncMock, patch, MagicMock
 import pytest
@@ -157,7 +158,7 @@ class TestChatAuth:
 
 # ================================================================== 6. POST /api/chat 正常流程
 class TestChatSuccess:
-    VALID_TOKEN = "Bearer test_token_123"
+    VALID_TOKEN = USER_BEARER
 
     def test_chat_with_valid_token_returns_200(self, client):
         resp = client.post(
@@ -193,7 +194,7 @@ class TestChatSuccess:
         resp = client.post(
             "/api/chat",
             json={"user_id": "u1", "query": "管理员测试"},
-            headers={"Authorization": "Bearer admin_token_456"},
+            headers={"Authorization": ADMIN_BEARER},
         )
         assert resp.status_code == 200
 
@@ -213,7 +214,7 @@ class TestOtherEndpoints:
         fake_result = [{"id": "c1", "title": "增值税暂行条例", "content": "第一条...", "score": 0.9}]
         with patch("services.tools.kb_tools.search_tax_policy", return_value=fake_result) as mock_search:
             resp = client.get("/api/search", params={"q": "增值税", "limit": 10},
-                              headers={"Authorization": "Bearer test_token_123"})
+                              headers={"Authorization": USER_BEARER})
         assert resp.status_code == 200
         body = resp.json()
         assert body["success"] is True
@@ -225,7 +226,7 @@ class TestOtherEndpoints:
         resp = client.get(
             "/api/memory",
             params={"user_id": "u1"},
-            headers={"Authorization": "Bearer test_token_123"},
+            headers={"Authorization": USER_BEARER},
         )
         assert resp.status_code == 200
         assert resp.json()["success"] is True
@@ -255,14 +256,14 @@ class TestOtherEndpoints:
         assert resp.status_code == 401
 
     def test_me_returns_user_role(self, client):
-        resp = client.get("/api/me", headers={"Authorization": "Bearer test_token_123"})
+        resp = client.get("/api/me", headers={"Authorization": USER_BEARER})
         assert resp.status_code == 200
         body = resp.json()
         assert body["role"] == "user"
         assert body["is_developer"] is False
 
     def test_me_returns_developer_role(self, client):
-        resp = client.get("/api/me", headers={"Authorization": "Bearer admin_token_456"})
+        resp = client.get("/api/me", headers={"Authorization": ADMIN_BEARER})
         assert resp.status_code == 200
         body = resp.json()
         assert body["role"] == "admin"
@@ -284,7 +285,7 @@ class TestOtherEndpoints:
         fake_mgr = MagicMock()
         fake_mgr.get_databases_by_user = AsyncMock(return_value={"databases": []})
         with patch("web.main.kb_manager", fake_mgr):
-            resp = client.get("/api/knowledge/databases", headers={"Authorization": "Bearer test_token_123"})
+            resp = client.get("/api/knowledge/databases", headers={"Authorization": USER_BEARER})
         assert resp.status_code == 200
         assert resp.json()["databases"] == []
 
@@ -296,7 +297,7 @@ class TestOtherEndpoints:
         resp = client.patch(
             "/api/conversations/sess_1",
             json={"title": "新标题"},
-            headers={"Authorization": "Bearer test_token_123"},
+            headers={"Authorization": USER_BEARER},
         )
         assert resp.status_code == 200
         assert resp.json()["success"] is True

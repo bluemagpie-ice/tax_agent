@@ -1,3 +1,4 @@
+from tests.auth_helpers import USER_BEARER, ADMIN_BEARER
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -9,8 +10,8 @@ from agents.memory import ConversationMemory
 from services.security import tenant_scope
 
 
-USER = {"Authorization": "Bearer test_token_123"}
-OTHER = {"Authorization": "Bearer admin_token_456"}
+USER = {"Authorization": USER_BEARER}
+OTHER = {"Authorization": ADMIN_BEARER}
 
 
 @pytest.fixture

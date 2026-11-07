@@ -43,7 +43,8 @@
             <a href="/policy#policy-section">政策更新</a>
         </nav>
     </header>
-    <div class="container">
+    <div class="container" id="training-content" hidden>
+        <p id="policy-auth-notice" role="status" hidden>请使用管理员身份查看政策更新。 <a href="/">返回首页切换身份</a></p>
         <div class="card">
             <h2>快速测试</h2>
             <div class="test-input">
@@ -117,11 +118,9 @@
     </div>
     <div class="toast" id="policy-toast" hidden role="status"></div>
 
+    <p id="training-auth-notice" class="container" role="status">正在验证身份…</p>
+    <script src="/static/auth.js"></script>
     <script>
-        // 与后端 main.py 鉴权逻辑对齐
-        const currentRole = sessionStorage.getItem('tax_agent_role') || 'user';
-        const AUTH_TOKEN = 'Bearer ' + (sessionStorage.getItem('tax_agent_' + currentRole + '_token') || (currentRole === 'admin' ? '' : ''));
-
         const testCases = [
             "餐饮发票能开专票抵扣吗？",
             "小规模纳税人的增值税税率是多少？",
@@ -147,9 +146,9 @@
             const resultBox = document.getElementById('test-result');
             resultBox.textContent = '测试中...';
             try {
-                const resp = await fetch('/api/chat', {
+                const resp = await TaxAuth.request('/api/chat', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': AUTH_TOKEN },
+                    headers: { 'Content-Type': 'application/json'},
                     body: JSON.stringify({ user_id: 'tester', query: query, session_id: 'test_session' })
                 });
                 const data = await resp.json();
@@ -177,7 +176,7 @@
             const intervalHours = Number(document.getElementById('policy-interval').value);
             button.disabled = true;
             try {
-                const response = await fetch('/api/policy/schedule', {method:'PUT', headers:{Authorization:AUTH_TOKEN,'Content-Type':'application/json'},
+                const response = await TaxAuth.request('/api/policy/schedule', {method:'PUT', headers:{'Content-Type':'application/json'},
                     body:JSON.stringify({interval_hours:intervalHours})});
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.detail || '保存失败');
@@ -188,7 +187,7 @@
         }
         async function loadPolicyStatus() {
             try {
-                const r = await fetch('/api/policy/status', { headers: { 'Authorization': AUTH_TOKEN } });
+                const r = await TaxAuth.request('/api/policy/status');
                 const d = await r.json();
                 if (!r.ok) throw new Error(d.detail || '状态获取失败');
                 const st = document.getElementById('policy-scheduler-status');
@@ -221,7 +220,7 @@
             btn.disabled = true; btn.textContent = '更新中...';
             document.getElementById('policy-progress').textContent = '准备扫描…';
             try {
-                const r = await fetch('/api/policy/update', { method: 'POST', headers: { 'Authorization': AUTH_TOKEN } });
+                const r = await TaxAuth.request('/api/policy/update', { method: 'POST'});
                 const d = await r.json();
                 const rpt = d.report;
                 if (!r.ok || !rpt) throw new Error(d.detail || '政策更新请求失败');
@@ -238,7 +237,7 @@
 
         async function loadSources() {
             try {
-                const r = await fetch('/api/policy/sources', { headers: { 'Authorization': AUTH_TOKEN } });
+                const r = await TaxAuth.request('/api/policy/sources');
                 const d = await r.json();
                 if (!r.ok) throw new Error(d.detail || '来源加载失败');
                 const tbody = document.getElementById('policy-sources-tbody');
@@ -266,7 +265,7 @@
             if (type === 'local') body.directory = dir;
             else body.urls = [dir];
             try {
-                const r = await fetch('/api/policy/sources', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': AUTH_TOKEN }, body: JSON.stringify(body) });
+                const r = await TaxAuth.request('/api/policy/sources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                 const d = await r.json();
                 if (!r.ok || !d.success) throw new Error(d.detail || '添加未完成');
                 loadSources(); loadPolicyStatus(); policyToast('政策源已添加并保存');
@@ -276,7 +275,7 @@
         async function removeSource(sourceId) {
             if (!confirm(`确定删除政策源 "${sourceId}" ？`)) return;
             try {
-                const response = await fetch(`/api/policy/sources/${encodeURIComponent(sourceId)}`, { method: 'DELETE', headers: { 'Authorization': AUTH_TOKEN } });
+                const response = await TaxAuth.request(`/api/policy/sources/${encodeURIComponent(sourceId)}`, { method: 'DELETE' });
                 if (!response.ok) {const data = await response.json(); throw new Error(data.detail || '删除未完成');}
                 loadSources(); loadPolicyStatus();
             } catch (e) { alert('删除失败: ' + e.message); }
@@ -284,7 +283,7 @@
 
         async function loadReports() {
             try {
-                const r = await fetch('/api/policy/reports?limit=10', { headers: { 'Authorization': AUTH_TOKEN } });
+                const r = await TaxAuth.request('/api/policy/reports?limit=10');
                 const d = await r.json();
                 const tbody = document.getElementById('policy-reports-tbody');
                 if (!d.reports || d.reports.length === 0) {
@@ -305,7 +304,7 @@
 
         async function loadChanges() {
             try {
-                const r = await fetch('/api/policy/changes?limit=10', { headers: { 'Authorization': AUTH_TOKEN } });
+                const r = await TaxAuth.request('/api/policy/changes?limit=10');
                 const d = await r.json();
                 if (!r.ok) throw new Error(d.detail || '变更列表加载失败');
                 const el = document.getElementById('policy-changes-list');
@@ -338,7 +337,7 @@
         async function loadDiff(uniqueKey, link) {
             const preEl = link.nextElementSibling;
             try {
-                const r = await fetch(`/api/policy/changes/${encodeURIComponent(uniqueKey)}`, { headers: { 'Authorization': AUTH_TOKEN } });
+                const r = await TaxAuth.request(`/api/policy/changes/${encodeURIComponent(uniqueKey)}`);
                 const d = await r.json();
                 if (!r.ok) throw new Error(d.detail || '获取 diff 失败');
                 preEl.textContent = d.diff || '无差异内容';
@@ -352,9 +351,37 @@
             document.querySelector('header h1').textContent = '政策更新';
             document.querySelectorAll('.container > .card').forEach((card, index) => { if (index < 3) card.hidden = true; });
         }
-        loadPolicyStatus(); loadSources(); loadReports();
-        const policyPoll = setInterval(loadPolicyStatus, 2000);
+        const trainingNotice = document.getElementById('training-auth-notice');
+        const trainingContent = document.getElementById('training-content');
+        let policyPoll;
+        function showTrainingAuthError(message) {
+            clearInterval(policyPoll);
+            trainingContent.hidden = true;
+            const link = document.createElement('a');
+            link.href = '/'; link.textContent = '返回首页登录';
+            trainingNotice.hidden = false;
+            trainingNotice.replaceChildren(message + '。', link);
+        }
+        window.addEventListener('tax-auth-changed', event => {
+            if (!TaxAuth.user()) showTrainingAuthError(event.detail.message);
+        });
+        async function initializeTraining() {
+            try {
+                const user = await TaxAuth.restore();
+                if (!user) { showTrainingAuthError('请先登录'); return; }
+                trainingNotice.hidden = true;
+                trainingContent.hidden = false;
+                if (user.role !== 'admin') {
+                    document.querySelectorAll('.container > .card').forEach((card, index) => { if (index >= 3) card.hidden = true; });
+                    document.getElementById('policy-auth-notice').hidden = false;
+                    return;
+                }
+                loadPolicyStatus(); loadSources(); loadReports();
+                policyPoll = setInterval(loadPolicyStatus, 2000);
+            } catch (error) { showTrainingAuthError(error.message); }
+        }
         window.addEventListener('pagehide', () => clearInterval(policyPoll));
+        initializeTraining();
     </script>
 </body>
 </html>

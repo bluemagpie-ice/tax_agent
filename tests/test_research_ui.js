@@ -24,7 +24,7 @@ function response(value,stream=false) {
 }
 const context={document:{getElementById:get,createElement:tag=>new Element(tag),createTextNode:text=>({textContent:text})},
     Option:function(text,value) {const element=new Element('option');element.textContent=text;element.value=value;return element;},
-    window:{addEventListener:(name,fn)=>{listeners[name]=fn;}},AUTH_TOKEN:'Bearer fixture',AbortController,TextDecoder,
+    window:{addEventListener:(name,fn)=>{listeners[name]=fn;}},AbortController,TextDecoder,
     fetch:async(url,options)=>{
         const body=options.body ? JSON.parse(options.body):null;calls.push({url,body});
         if(url==='/api/research/tasks' && !body) return response([]);
@@ -37,6 +37,8 @@ const context={document:{getElementById:get,createElement:tag=>new Element(tag),
         if(url==='/api/research/cases/case') {caseRecord={...caseRecord,revision:caseRecord.revision+1,save_confirmed:true,status:body.action==='publish' ? 'published':'draft'};return response(caseRecord);}
         throw Error('Unexpected endpoint '+url);
     }};
+const auth = {};
+context.TaxAuth = {request:(...args)=>context.fetch(...args),snapshot:()=>auth,user:()=>null};
 vm.createContext(context); vm.runInContext(fs.readFileSync('web/static/research.js','utf8'),context);
 const settle=async()=>{for(let i=0;i<30;i++) await new Promise(resolve=>setImmediate(resolve));};
 const findButton=text=>get('research-result').querySelectorAll('button').find(b=>b.textContent===text);

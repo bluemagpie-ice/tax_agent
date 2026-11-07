@@ -1,4 +1,5 @@
 """演示闭环回归：真实图编译、SSE 编排、配置与网络异常；外部 LLM 使用替身。"""
+from tests.auth_helpers import USER_BEARER, ADMIN_BEARER
 import asyncio
 import base64
 import importlib
@@ -29,7 +30,7 @@ def runtime(tmp_path, monkeypatch):
 
 def test_sse_uses_orchestrator_and_preserves_text(runtime):
     main, client, agent = runtime
-    resp = client.post("/api/chat/stream", headers={"Authorization": "Bearer test_token_123"},
+    resp = client.post("/api/chat/stream", headers={"Authorization": USER_BEARER},
                        json={"user_id": "u", "query": "进项税是什么", "session_id": "demo", "web_search": True})
     assert resp.status_code == 200
     assert "event: done" in resp.text
@@ -43,7 +44,7 @@ def test_sse_uses_orchestrator_and_preserves_text(runtime):
 @pytest.mark.parametrize("endpoint", ["/api/chat", "/api/chat/stream"])
 def test_blank_query_rejected(runtime, endpoint):
     _, client, agent = runtime
-    resp = client.post(endpoint, headers={"Authorization": "Bearer test_token_123"},
+    resp = client.post(endpoint, headers={"Authorization": USER_BEARER},
                        json={"user_id": "u", "query": "  "})
     assert resp.status_code == 400
     agent.run.assert_not_called()
@@ -66,7 +67,7 @@ def test_config_mask_and_invalid_url_do_not_overwrite_key(tmp_path, monkeypatch)
 def test_settings_refreshes_existing_client(runtime):
     _, client, agent = runtime
     agent.llm = SimpleNamespace(temperature=0.3)
-    resp = client.post("/api/settings", headers={"Authorization": "Bearer admin_token_456"},
+    resp = client.post("/api/settings", headers={"Authorization": ADMIN_BEARER},
                        json={"llm": {"api_key": "demo-secret-key", "model": "custom-model", "base_url": "https://example.com/v1"}})
     assert resp.status_code == 200
     assert agent.llm.model_name == "custom-model"
@@ -156,7 +157,7 @@ def test_missing_config_real_lifespan_starts_and_stops(tmp_path, monkeypatch):
     monkeypatch.delenv("TAX_CN_LISTING_URL", raising=False)
     with TestClient(main.app) as client:
         assert client.get("/").status_code == 200
-        response = client.post("/api/chat", headers={"Authorization": "Bearer test_token_123"},
+        response = client.post("/api/chat", headers={"Authorization": USER_BEARER},
                                json={"user_id": "u", "query": "税务问题"})
         assert response.status_code == 503
     engine.dispose()

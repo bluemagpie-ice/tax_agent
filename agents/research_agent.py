@@ -11,6 +11,7 @@ import json
 import os
 import re
 import time
+from contextlib import ExitStack
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import TypedDict, Literal
@@ -28,6 +29,7 @@ from services.security import checkpoint_thread_id, require_tenant, document_vis
 
 _run_metrics = ContextVar("research_run_metrics", default=None)
 _progress = ContextVar("research_progress", default=None)
+_personal_model = ContextVar("research_personal_model", default=None)
 
 
 async def progress(stage, activity):
@@ -138,11 +140,13 @@ class ResearchAgent(BaseAgent):
             return self._llm
         from services.config_manager import ConfigManager
         from langchain_openai import ChatOpenAI
-        cfg = ConfigManager().get_llm_config()
+        personal = _personal_model.get()
+        cfg, client = personal if personal else (ConfigManager().get_llm_config(), None)
         if not cfg.get("api_key") or cfg["api_key"].startswith("your_") or not cfg.get("model") or not cfg.get("base_url"):
             raise ValueError("请先配置模型、API Key 和 Base URL")
+        options = {"http_client": client} if personal else {}
         return ChatOpenAI(**{k: cfg[k] for k in ("model", "api_key", "base_url")},
-                          temperature=0, max_retries=0, timeout=45)
+                          temperature=0, max_retries=0, timeout=45, **options)
 
     async def ask(self, data, instruction, payload, schema, *, repairing=False):
         from pydantic import ValidationError
@@ -203,14 +207,22 @@ class ResearchAgent(BaseAgent):
                 label = "模型请求超时" if "timeout" in type(exc).__name__.lower() else "模型调用失败"
                 raise ResearchFailure("model_call_failed", label + "，请检查模型连接后恢复任务",
                                       details={"provider_error_type": type(exc).__name__}) from exc
-            call["response"] = str(result.content)
+            raw = str(result.content)
+            response_model = getattr(result, "response_metadata", {}).get("model_name")
+            personal = _personal_model.get()
+            if personal:
+                key = personal[0]["api_key"]
+                raw = raw.replace(key, "[密钥已脱敏]")
+                if isinstance(response_model, str):
+                    response_model = response_model.replace(key, "[密钥已脱敏]")
+            call["response"] = raw
             call["usage"] = getattr(result, "usage_metadata", None)
             actual = (call["usage"] or {}).get("total_tokens")
             if isinstance(actual, int) and actual >= 0:
                 data["token_upper_spent"] += actual - upper
             call["model_id"] = getattr(model, "model_name", None)
-            call["response_model_id"] = getattr(result, "response_metadata", {}).get("model_name")
-            raw = str(result.content).strip()
+            call["response_model_id"] = response_model
+            raw = raw.strip()
             if raw.startswith("```") and "\n" in raw:
                 raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
             try:
@@ -839,7 +851,15 @@ class ResearchAgent(BaseAgent):
                                       ("task_id", "stage", "activity", "status", "elapsed_ms", "revision")})
 
         progress_token = _progress.set(publish)
+        personal_token = _personal_model.set(None)
+        clients = ExitStack()
         try:
+            if self._llm is None:
+                from services.personal_models import get_personal_model, personal_model_client
+                personal = get_personal_model()
+                if personal:
+                    client = clients.enter_context(personal_model_client(personal["base_url"], 45))
+                    _personal_model.set((personal, client))
             graph = await self.get_graph()
             config = self.config(task_id)
             snapshot = await graph.aget_state(config)
@@ -913,6 +933,10 @@ class ResearchAgent(BaseAgent):
             data.pop("activity", None)
             return self.store.save(data, lease)
         finally:
-            self.store.release(task_id, lease)
-            _run_metrics.reset(metrics_token)
-            _progress.reset(progress_token)
+            try:
+                self.store.release(task_id, lease)
+            finally:
+                _personal_model.reset(personal_token)
+                _run_metrics.reset(metrics_token)
+                _progress.reset(progress_token)
+                clients.close()

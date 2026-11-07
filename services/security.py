@@ -48,7 +48,7 @@ def redact_identifiers(text: str) -> str:
     text = re.sub(r"(?<!\d)1[3-9]\d{9}(?!\d|(?:\.\d+)?\s*(?:元|万元|亿元))", "[手机号已脱敏]", text)
     text = re.sub(r"((?:税号|纳税人识别号|统一社会信用代码|银行卡号|银行账号)\s*[：:=]?\s*)[A-Za-z0-9]{15,22}(?![A-Za-z0-9])", r"\1[标识已脱敏]", text)
     for name, value in os.environ.items():
-        if name.endswith(("API_KEY", "AUTH_USER_TOKEN", "AUTH_ADMIN_TOKEN", "DEVELOPER_TOKEN")) and len(value) >= 8:
+        if name.endswith(("API_KEY", "AUTH_USER_TOKEN", "AUTH_ADMIN_TOKEN", "DEVELOPER_TOKEN", "AUTH_SESSION_SECRET")) and len(value) >= 8:
             text = text.replace(value, "[密钥已脱敏]")
     return text
 

@@ -1,4 +1,5 @@
 """政策管理持久化、动态调度与进度，不连接真实网站或云端。"""
+from tests.auth_helpers import ADMIN_BEARER
 import threading
 from types import SimpleNamespace
 
@@ -6,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from knowledge.policy_updater import PolicyUpdater, TaxGovCnSource
 
-USER = {"Authorization":"Bearer admin_token_456"}
+USER = {"Authorization":ADMIN_BEARER}
 
 
 def test_sources_and_schedule_survive_reconstruction(tmp_path, monkeypatch):

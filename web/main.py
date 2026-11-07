@@ -52,6 +52,7 @@ logging.basicConfig(
 
 import os
 import inspect
+import re
 import time
 import uuid
 from datetime import datetime
@@ -60,20 +61,28 @@ from typing import Optional, List
 from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, status, Header
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.params import Depends
-from starlette.responses import HTMLResponse, Response, StreamingResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, SecretStr, StrictBool
+from dotenv import load_dotenv
+from services.access_sessions import IDENTITIES, issue_session, session_role
 from services.security import bind_tenant, reset_tenant
 from services.config_manager import ConfigManager, MODEL_PROVIDERS, validate_api_url, infer_provider
-from services.network_security import validate_outbound_url
+from services.network_security import OutboundDNSFailure, validate_outbound_url
+from services.personal_models import (
+    get_personal_model, normalize_model_url, personal_model_client, personal_model_key, save_personal_model,
+)
 
 
 logger = logging.getLogger(__name__)
 
 from services.paths import DATA_DIR, UPLOAD_DIR
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 PATHS = {
     "templates": str(Path(__file__).resolve().parent / "templates"),
     "uploads": str(UPLOAD_DIR),
@@ -232,6 +241,14 @@ app = FastAPI(
     description="实现税务计算、咨询筹划相关的智能体",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError):
+    if request.url.path.startswith(("/api/auth/", "/api/settings")):
+        return JSONResponse({"detail": "请求格式或字段长度无效，请检查输入。"}, status_code=422)
+    return await request_validation_exception_handler(request, exc)
+
 
 from fastapi.staticfiles import StaticFiles
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "web" / "static")), name="static")
@@ -563,29 +580,31 @@ async def get_current_user(authorization: str = Header(default="")):
     使用 async generator + yield 是为了让 FastAPI 在请求生命周期内自动处理 try/finally，
     确保 bind_tenant() 对应的 reset_tenant() 一定被调用，避免 contextvar 泄漏到下一个请求。
     """
-    if not authorization.startswith("Bearer "):
+    challenge = {"WWW-Authenticate": "Bearer"}
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="缺少访问 Token，请先登录",
+            headers=challenge,
+        )
+    scheme, _, raw_token = authorization.partition(" ")
+    raw_token = raw_token.lstrip(" ")
+    if scheme.lower() != "bearer" or not re.fullmatch(r"[!-~]+", raw_token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="无效的认证格式，请使用 Bearer Token",
+            headers=challenge,
         )
 
-    raw_token = authorization.split(" ")[1]
-
-    # 演示用 token，支持通过环境变量覆盖（生产环境务必替换为真实鉴权）
-    # - AUTH_USER_TOKEN : 普通用户 token
-    # - DEVELOPER_TOKEN : 开发者 token（优先），回退到 AUTH_ADMIN_TOKEN
-    user_token = os.getenv("AUTH_USER_TOKEN", "")
-    developer_token = os.getenv("DEVELOPER_TOKEN") or os.getenv("AUTH_ADMIN_TOKEN", "")
-
-    if raw_token and user_token and raw_token == user_token and user_token != developer_token:
-        current_user = CurrentUser(id="user_001", user_name="张三", role="user")
-    elif raw_token and developer_token and raw_token == developer_token and user_token != developer_token:
-        current_user = CurrentUser(id="user_000", user_name="开发者", role="admin")
-    else:
+    role = session_role(raw_token)
+    if role is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无效的凭证，请重新登录",
+            detail="访问 Token 无效或已失效，请重新登录",
+            headers=challenge,
         )
+    user_id, name = IDENTITIES[role]
+    current_user = CurrentUser(id=user_id, user_name=name, role=role)
 
     # —— 关键：把用户 ID 绑定到租户上下文 ——
     tenant_token = bind_tenant(str(current_user.id))
@@ -656,7 +675,7 @@ async def tax_chat(body: TaxQueryRequest, current_user: CurrentUser = Depends(ge
     if not body.query.strip():
         raise HTTPException(status_code=400, detail="请输入税务问题")
     if tax_agent is None:
-        raise HTTPException(status_code=503, detail="请先在 ⚙ 模型配置弹窗填写模型、API Key 和 Base URL")
+        raise HTTPException(status_code=503, detail="请联系管理员配置系统默认对话模型，或切换到研究使用个人模型")
     logger.info("[同步请求] query_length=%d", len(body.query))
 
     try:
@@ -713,7 +732,7 @@ async def tax_chat_stream(
     if not body.query.strip():
         raise HTTPException(status_code=400, detail="请输入税务问题")
     if tax_agent is None:
-        raise HTTPException(status_code=503, detail="请先在 ⚙ 模型配置弹窗填写模型、API Key 和 Base URL")
+        raise HTTPException(status_code=503, detail="请联系管理员配置系统默认对话模型，或切换到研究使用个人模型")
     logger.info("[流式请求] query_length=%d", len(body.query))
 
     from langchain_core.messages import HumanMessage
@@ -1568,9 +1587,29 @@ _KNOWN_MODELS = [
 ]
 
 
+class LoginRequest(BaseModel):
+    credential: SecretStr
+
+
+@app.post("/api/auth/login")
+def login(body: LoginRequest, response: Response):
+    credential = body.credential.get_secret_value()
+    if not credential or len(credential) > 4096:
+        raise HTTPException(401, "登录凭证无效，请核对服务端配置后重试。")
+    try:
+        token, expires = issue_session(credential)
+    except ValueError as exc:
+        raise HTTPException(401, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return {"access_token": token, "token_type": "bearer", "expires_at": expires}
+
+
 @app.get("/api/me")
-def me(current_user: CurrentUser = Depends(get_current_user)):
+def me(response: Response, current_user: CurrentUser = Depends(get_current_user)):
     """返回当前登录用户信息（前端据此决定是否展示开发者选项）。"""
+    response.headers["Cache-Control"] = "no-store"
     return {
         "success": True,
         "id": current_user.id,
@@ -1609,9 +1648,50 @@ class ChatConnectionRequest(BaseModel):
     model: str = Field(default="", max_length=512)
 
 
+@app.get("/api/settings/personal")
+def get_personal_settings(response: Response, current_user: CurrentUser = Depends(get_current_user)):
+    saved = get_personal_model() or {}
+    url = saved.get("base_url", "")
+    response.headers["Cache-Control"] = "no-store"
+    return {"success": True, "providers": MODEL_PROVIDERS, "config": {"llm": {
+        "model": saved.get("model", ""), "base_url": url, "provider": infer_provider(url),
+        "api_key_set": bool(saved.get("api_key")),
+    }}}
+
+
+@app.put("/api/settings/personal")
+def update_personal_settings(body: ChatConnectionRequest, current_user: CurrentUser = Depends(get_current_user)):
+    model = body.model.strip()
+    key = body.api_key.get_secret_value().strip()
+    if not model or len(key) > 4096:
+        raise HTTPException(400, "请填写模型名称，并检查 API Key 长度。")
+    try:
+        url = normalize_model_url(body.base_url)
+        validate_outbound_url(url, model=True)
+    except ValueError as exc:
+        raise HTTPException(400, "API 地址无效或服务端无法解析，请检查 API 基础地址。") from exc
+    try:
+        save_personal_model(model, url, key)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        logger.warning("[保存个人模型] %s", type(exc).__name__)
+        raise HTTPException(500, "模型配置保存失败，请稍后重试。") from exc
+    return {"success": True}
+
+
+@app.post("/api/settings/personal/connection")
+def test_personal_connection(body: ChatConnectionRequest, current_user: CurrentUser = Depends(get_current_user)):
+    return check_chat_connection(body, personal=True)
+
+
 @app.post("/api/settings/connection")
 def test_chat_connection(body: ChatConnectionRequest, current_user: CurrentUser = Depends(require_admin)):
     """Make an actual OpenAI-compatible inference request without saving settings."""
+    return check_chat_connection(body, personal=False)
+
+
+def check_chat_connection(body, *, personal):
     from langchain_openai import ChatOpenAI
     from openai import APIConnectionError, APITimeoutError
 
@@ -1620,24 +1700,25 @@ def test_chat_connection(body: ChatConnectionRequest, current_user: CurrentUser 
 
     if not body.base_url.strip() or not body.model.strip():
         return result("configuration_missing", "请填写模型名称和 API 地址。")
-    supplied_key = body.api_key.get_secret_value()
+    supplied_key = body.api_key.get_secret_value().strip()
     if len(supplied_key) > 4096:
         return result("request_error", "API Key 长度超出配置上限。")
     try:
-        url = validate_api_url(body.base_url.strip())
+        url = normalize_model_url(body.base_url)
         validate_outbound_url(url, model=True)
-        if url.rstrip("/").endswith(("/chat/completions", "/models", "/responses")):
-            raise ValueError("Expected base URL")
-        key = ConfigManager().resolve_model_key("llm", url, supplied_key)
+        key = personal_model_key(url, supplied_key) if personal else ConfigManager().resolve_model_key("llm", url, supplied_key)
+    except OutboundDNSFailure:
+        return result("network_error", "服务器无法解析模型服务地址，请检查网络和域名。")
     except ValueError:
         return result("invalid_base_url", "API 地址不正确，请填写提供商的 API 基础地址。")
     if not key or key.startswith("your_"):
         return result("configuration_missing", "请填写该 API 地址对应的 Key。")
     try:
-        model = ChatOpenAI(model=body.model.strip(), api_key=key, base_url=url,
-                           temperature=0, max_retries=0, timeout=20)
-        options = {"reasoning_effort": "low"} if body.model.strip() == "glm-5.3" else {}
-        model.invoke("Reply with OK.", max_tokens=32, **options)
+        with personal_model_client(url, 20) if personal else nullcontext() as client:
+            model = ChatOpenAI(model=body.model.strip(), api_key=key, base_url=url, http_client=client,
+                               temperature=0, max_retries=0, timeout=20)
+            options = {"reasoning_effort": "low"} if body.model.strip() == "glm-5.3" else {}
+            model.invoke("Reply with OK.", max_tokens=32, **options)
         return result("connected", "连接成功，模型已响应测试请求。")
     except APITimeoutError:
         return result("timeout", "模型请求超时，请检查网络或稍后重试。")
@@ -1646,14 +1727,16 @@ def test_chat_connection(body: ChatConnectionRequest, current_user: CurrentUser 
     except Exception as exc:
         status = getattr(exc, "status_code", None)
         logger.warning("[模型连接测试] %s HTTP=%s", type(exc).__name__, status)
-        if status in (401, 403):
-            return result("authentication_failed", "模型服务拒绝认证，请检查 Key 和访问权限。")
         body = getattr(exc, "body", None)
         upstream = body.get("error", body) if isinstance(body, dict) else {}
         code = str(upstream.get("code", "")).lower() if isinstance(upstream, dict) else ""
-        if code in {"model_not_found", "model_not_exist", "invalid_model", "1211"}:
+        if code in {"model_not_found", "model_not_exist", "invalid_model", "model_access_denied", "1211"}:
             return result("model_not_found", "模型不存在或当前账号无权使用，请核对模型名称。")
-        if status in (404, 405):
+        if status == 401 or code in {"invalid_api_key", "authentication_error"}:
+            return result("authentication_failed", "模型服务拒绝认证，请检查 Key 和访问权限。")
+        if status == 403:
+            return result("model_not_found", "当前账号无权访问该模型，请核对模型和服务商权限。")
+        if status in (301, 302, 303, 307, 308, 404, 405):
             return result("invalid_base_url", "该 API 地址未返回兼容的推理接口，请核对服务商地址和协议。")
         if status == 429:
             return result("rate_limit", "服务商限制了请求，请检查额度或稍后重试。")

@@ -1,3 +1,4 @@
+from tests.auth_helpers import USER_BEARER
 import json
 from concurrent.futures import ThreadPoolExecutor
 
@@ -50,7 +51,7 @@ def test_invalid_recalculation_is_recoverable_not_unhandled(tmp_path):
 
 def test_kb_name_traversal_rejected_before_filesystem():
     from web.main import app
-    response = TestClient(app).post("/api/knowledge/databases", headers={"Authorization":"Bearer test_token_123"}, json={"name":"../../evil", "kb_type":"qdrant"})
+    response = TestClient(app).post("/api/knowledge/databases", headers={"Authorization":USER_BEARER}, json={"name":"../../evil", "kb_type":"qdrant"})
     assert response.status_code == 400
 
 

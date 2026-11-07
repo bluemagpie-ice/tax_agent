@@ -1,4 +1,5 @@
 """政策变更展示：真实文件与 SQLite，HTTP/Cloud 不在本测试中调用。"""
+from tests.auth_helpers import ADMIN_BEARER
 import sqlite3
 from datetime import datetime
 from urllib.parse import quote
@@ -134,7 +135,7 @@ def test_changes_api_preserves_existing_fields_and_diff(tmp_path, monkeypatch):
         monkeypatch.setattr(main, "policy_updater", updater)
         monkeypatch.setenv("AUTH_USER_TOKEN", "test_token_123")
         client = TestClient(main.app)
-        headers = {"Authorization":"Bearer admin_token_456"}
+        headers = {"Authorization":ADMIN_BEARER}
         response = client.get("/api/policy/changes", headers=headers)
         assert response.status_code == 200
         change = response.json()["changes"][0]

@@ -18,6 +18,8 @@ os.environ["TAX_AGENT_DATA_DIR"] = str(_TEST_ROOT / "data")
 os.environ["TAX_AGENT_UPLOAD_DIR"] = str(_TEST_ROOT / "uploads")
 os.environ["AUTH_USER_TOKEN"] = "test_token_123"
 os.environ["AUTH_ADMIN_TOKEN"] = "admin_token_456"
+os.environ.pop("DEVELOPER_TOKEN", None)
+os.environ["AUTH_SESSION_SECRET"] = "test-only-signing-fixture"
 for _key in ("LLM_API_KEY", "EMBEDDING_API_KEY", "QDRANT_API_KEY", "QDRANT_CLUSTER_URL"):
     os.environ[_key] = ""
 

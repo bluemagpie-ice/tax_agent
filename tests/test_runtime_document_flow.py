@@ -1,8 +1,9 @@
 """文档真实 CRUD/过滤使用 Qdrant 本地引擎；模型使用可控流，绝不操作真实云端。"""
+from tests.auth_helpers import USER_BEARER, ADMIN_BEARER
 import asyncio
 import importlib
 import json
-import time
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -58,8 +59,8 @@ def document_app(tmp_path, monkeypatch):
     blocked_document_ids.clear()
 
 
-USER = {"Authorization": "Bearer test_token_123"}
-ADMIN = {"Authorization": "Bearer admin_token_456"}
+USER = {"Authorization": USER_BEARER}
+ADMIN = {"Authorization": ADMIN_BEARER}
 
 
 def upload(client, scope="global", session="", headers=USER, text="A document about input tax."):
@@ -168,14 +169,16 @@ def test_real_orchestrator_emits_tokens_before_finishing(tmp_path, monkeypatch):
     agent.record_turn = MagicMock()
     agent.router = HybridIntentRouter()
     finished = []
+    first_token_delivered = Event()
     class Model:
         def stream(self, messages):
             for text in ("first ", "second ", "last"):
-                time.sleep(0.03)
                 yield AIMessageChunk(content=text)
     class Child:
         async def run(self, *args, **kwargs):
             response = await asyncio.to_thread(invoke_answer, Model(), [])
+            # Guardrails publish only after the whole model response has been checked.
+            assert await asyncio.to_thread(first_token_delivered.wait, 5)
             finished.append(True)
             return response.content
     agent.registry = SimpleNamespace(get=lambda name: Child())
@@ -189,6 +192,7 @@ def test_real_orchestrator_emits_tokens_before_finishing(tmp_path, monkeypatch):
             if block.startswith("event: token"):
                 before_finish |= not finished
                 parts.append(json.loads(block.split("data: ")[1])["text"])
+                first_token_delivered.set()
         assert before_finish
         assert parts == ["first ", "second ", "last"]
     asyncio.run(collect())

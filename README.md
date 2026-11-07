@@ -44,10 +44,11 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 
 ### 2. 配置模型和资料来源
 
-- **对话模型。** 在首页打开「模型配置」，填入支持 OpenAI 兼容接口的 Base URL、模型 ID 和 API Key。点击「检测连接」，成功后保存。也可以在启动前通过 [配置样例](.env.example) 对照填写 `.env` 中的 `LLM_*` 项。页面已保存的模型配置优先于环境变量。
+- **个人研究模型。** 登录后打开「模型配置 → 个人模型」，填写 OpenAI 兼容的 Base URL、模型 ID 和 API Key。可先「测试连接」再保存。同一地址留空会保留已保存的 Key，换地址需提供该地址的 Key。保存后，新启动或恢复的研究使用当前账号的个人模型。
+- **系统默认模型。** 管理员可在「模型配置 → 系统默认模型」管理默认模型和 Qdrant。普通对话和未设置个人模型的研究使用系统默认模型。原 `data/config.json` 继续作为全局配置，并优先于 [配置样例](.env.example) 中的 `LLM_*` 环境变量。个人配置独立保存在业务数据库中，启动时自动建表。
 - **政策知识库。** 文档向量入库和检索需要 Embedding 服务及可访问的 Qdrant。配置 `EMBEDDING_*`、`VECTOR_SIZE` 和 `QDRANT_CLUSTER_URL`，按实例要求填写 `QDRANT_API_KEY`。向量维度应与所选 Embedding 模型匹配。启动时会尝试将 `knowledge/presets/` 下的预置资料入库。
 - **官网检索。** 首次试用 Research 时，可勾选「检索并读取官方网页」，通过网络搜索和读取官方来源。关闭该选项时，研究依赖已配置且有相关资料的政策知识库。
-- **本地身份。** 在 `.env` 配置不同的 `AUTH_USER_TOKEN` 与 `DEVELOPER_TOKEN`（或 `AUTH_ADMIN_TOKEN`）。首页「模型配置」中填入凭证并选择「验证并应用访问 Token」。管理配置和政策更新仅管理员可用；本地模型/Qdrant 地址在 `TAX_AGENT_MODEL_ALLOWED_ORIGINS` 显式允许。
+- **本地身份。** 为 `.env` 中的 `AUTH_USER_TOKEN`（普通用户）、`DEVELOPER_TOKEN`（管理员，可用 `AUTH_ADMIN_TOKEN` 作为备选）和 `AUTH_SESSION_SECRET`（服务端签发密钥）分别生成独立随机值，例如用 Python 的 `secrets.token_urlsafe(32)`。在首页输入对应账号的登录凭证。API 客户端应先向 `POST /api/auth/login` 提交 `{"credential": "..."}`，再把返回的 `access_token` 放在 `Authorization: Bearer …` 中。会话有效期为 8 小时，同标签页刷新可恢复。首次升级需重新登录。仅管理员可管理政策更新。本地模型和 Qdrant 地址需在 `TAX_AGENT_MODEL_ALLOWED_ORIGINS` 中显式允许。
 
 外部模型、向量和搜索服务可能接收问题或检索内容。试用时请使用公开资料或已泛化的业务事实。
 

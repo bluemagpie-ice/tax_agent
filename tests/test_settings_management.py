@@ -1,11 +1,13 @@
 """设置接口使用临时配置；网络与密钥按端点隔离，不改真实配置。"""
+from tests.auth_helpers import ADMIN_BEARER
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
-USER = {"Authorization": "Bearer admin_token_456"}
+USER = {"Authorization": ADMIN_BEARER}
 
 
 @pytest.fixture
@@ -108,7 +110,7 @@ def test_switch_provider_and_custom_model_save_without_old_key(settings_app):
     assert manager.get_all_config()["llm"]["provider"] == "自定义"
 
 
-def test_key_save_updates_chat_and_research_without_starting_rag(settings_app, monkeypatch):
+def test_provider_model_and_key_save_update_chat_and_research_without_starting_rag(settings_app, monkeypatch):
     from agents.research_agent import ResearchAgent
     from langchain_openai import ChatOpenAI
     import httpx
@@ -125,15 +127,17 @@ def test_key_save_updates_chat_and_research_without_starting_rag(settings_app, m
     new_key = "demo-new-test-credential"
     seen = []
     def fake_provider(request):
-        seen.append(request.headers["Authorization"])
-        return httpx.Response(200, json={"id":"fake", "model":"glm-test", "choices":[
+        seen.append((request.url.host, json.loads(request.content)["model"], request.headers["Authorization"]))
+        return httpx.Response(200, json={"id":"fake", "model":"gemini-test", "choices":[
             {"index":0, "finish_reason":"stop", "message":{"role":"assistant","content":"fixture OK"}}
         ]})
     transport = httpx.MockTransport(fake_provider)
     http = httpx.Client(transport=transport)
     monkeypatch.setattr("langchain_openai.ChatOpenAI", lambda **kw: ChatOpenAI(**kw, http_client=http))
     response = client.post("/api/settings", headers=USER, json={
-        "llm": {"api_key": new_key}, "embedding": {"model": "BAAI/bge-m3"},
+        "llm": {"provider": "Gemini", "model": "gemini-test", "base_url": config.MODEL_PROVIDERS["Gemini"],
+                "api_key": new_key},
+        "embedding": {"model": "BAAI/bge-m3"},
     })
     assert response.status_code == 200
     vector.assert_not_called()
@@ -144,11 +148,13 @@ def test_key_save_updates_chat_and_research_without_starting_rag(settings_app, m
     try:
         assert chat.llm.invoke("test").content == "fixture OK"
         assert research.invoke("test").content == "fixture OK"
-        assert seen == [f"Bearer {new_key}"] * 2
+        assert seen == [("generativelanguage.googleapis.com", "gemini-test", f"Bearer {new_key}")] * 2
     finally:
         http.close()
     current = client.get("/api/settings", headers=USER)
-    assert current.json()["config"]["llm"]["api_key_set"] is True
+    llm = current.json()["config"]["llm"]
+    assert llm["api_key_set"] is True
+    assert (llm["provider"], llm["model"]) == ("Gemini", "gemini-test")
     assert new_key not in current.text and new_key not in response.text
     assert client.post("/api/settings", headers=USER, json={"llm":{"api_key":""}}).status_code == 200
     assert config.ConfigManager().get_llm_config()["api_key"] == new_key

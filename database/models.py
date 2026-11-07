@@ -31,6 +31,16 @@ class User(Base):
     def __repr__(self):
         return f"User(id = {self.id}, username = {self.username})"
 
+
+class PersonalModelConfig(Base):
+    __tablename__ = "personal_model_configs"
+
+    owner_id = Column(String(120), primary_key=True)
+    model = Column(String(512), nullable=False)
+    base_url = Column(Text, nullable=False)
+    api_key = Column(Text, nullable=False)
+
+
 class KnowledgeFiles(Base):
     """
     上传的文件信息
