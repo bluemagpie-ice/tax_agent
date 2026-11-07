@@ -137,7 +137,8 @@ class ConversationMemory:
             session["messages"].extend(
                 [
                     {"role": "user", "content": user_message, "at": now},
-                    {"role": "assistant", "content": assistant_message, "at": now},
+                    {"role": "assistant", "content": assistant_message, "at": now,
+                     **({"exclude_from_context": True} if (metadata or {}).get("context_verified") is False else {})},
                 ]
             )
             # 更新用户画像（会话级 + 跨会话用户级）

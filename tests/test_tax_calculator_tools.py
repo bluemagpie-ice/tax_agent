@@ -490,11 +490,6 @@ class TestEdgeCases:
         assert result.tax_amount == 0.0
 
     def test_negative_sales_handled(self):
-        """负销售额：当前实现不抛异常，但销项为负 → 抵扣后为负 → 留抵归零逻辑兜住，税额应为 0 且不为负"""
-        result = calculate_vat(
-            taxpayer_type="general",
-            sales_amount=-1000,
-            vat_rate=0.13,
-        )
-        # 销项 = -1000 × 13% = -130 → net_tax = -130 < 0 → 置 0
-        assert result.tax_amount == 0.0
+        """Credit-note/negative adjustments need a separate explicit calculation path."""
+        with pytest.raises(ValueError, match="非负销售额"):
+            calculate_vat(taxpayer_type="general", sales_amount=-1000)

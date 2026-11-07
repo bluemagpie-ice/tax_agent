@@ -251,9 +251,11 @@ class AgentRegistry:
         if board["delegation_count"] >= 3:
             raise ValueError("本轮委托最多3次，请根据已完成结果回答")
         board["delegation_count"] += 1  # 主事件循环中、第一次await前登记，避免并发超额。
+        import uuid
+        run_id = uuid.uuid4().hex
         sequence = board["delegation_count"]
         child_context = {**context, "agent_path": [*path, target],
-                         "thread_id": f"{board['session_id']}:delegate:{sequence}:{target}", "_result_metadata": {}}
+                         "thread_id": f"{board['session_id']}:delegate:{run_id}:{sequence}:{target}", "_result_metadata": {}}
         loop = asyncio.get_running_loop()
         def request_peer(agent, task):
             future = asyncio.run_coroutine_threadsafe(self.delegate(agent, task, child_context), loop)
@@ -417,7 +419,7 @@ class TaxAgent(BaseAgent):
             return state
 
         agent_name = chain[idx]
-        user_query = self._extract_user_query(state)
+        user_query = state.get("original_query") or self._extract_user_query(state)
         user_query = self._enrich_query_with_files(user_query, state)
 
         # ---- 调用 agent ----
@@ -525,7 +527,7 @@ class TaxAgent(BaseAgent):
         如果只有 1 个 agent 输出且无错误 → 直接用它，跳过汇总 LLM。
         """
         outputs = state.get("agent_outputs", [])
-        user_query = self._extract_user_query(state)
+        user_query = state.get("original_query") or self._extract_user_query(state)
         user_query = self._enrich_query_with_files(user_query, state)
 
         # ---- 兜底情况 ----
@@ -954,12 +956,20 @@ class TaxAgent(BaseAgent):
         from services.calculators.tools import ALL_TAX_TOOLS
         calculators = {t.name: t for t in ALL_TAX_TOOLS}
         recalculated = []
+        calculation_errors = []
         for item in evidence:
-            if item["tool"] in calculators and item["status"] == "success":
-                result = json.loads(calculators[item["tool"]].invoke(item["args"]))
-                if "error" in result:
-                    raise RuntimeError("计算复核失败，不能发布未经核验的税额")
-                recalculated.append({"tool": item["tool"], "result": result})
+            if item.get("tool") in calculators and item.get("status") == "success":
+                try:
+                    result = json.loads(calculators[item["tool"]].invoke(item["args"]))
+                    if "error" in result:
+                        raise ValueError("计算器未返回有效结果")
+                    recalculated.append({"tool": item["tool"], "result": result})
+                except Exception as exc:
+                    calculation_errors.append(type(exc).__name__)
+        if calculation_errors:
+            final = answer + "\n\n⚠️ 计算复核未完成，以上金额未经核验，请补充有效参数后重算。"
+            return {"final_answer":final, "messages":[AIMessage(content=final)],
+                    "reflection":{"ok":False,"changed":True,"issues":["计算参数校验失败"]}}
         # 简单问候没有税务事实或金额，保留原回答并记录本地校验，避免额外模型延迟。
         import re
         simple = bool(re.fullmatch(r"\s*(你好|您好|hi|hello|谢谢|多谢)[！!。.\s]*", state.get("original_query", ""), re.I))
@@ -1001,7 +1011,7 @@ class TaxAgent(BaseAgent):
             # 单个计算器结果用独立复算的精确税额兜住模型的错误修正/误判。
             if len(recalculated) == 1:
                 expected = recalculated[0]["result"]["tax_amount"]
-                pattern = r"(?:应纳(?:税额|增值税|税款)?|应缴(?:税额|税款)?|应交(?:税额)?)[^\n\d]{0,24}([\d,]+(?:\.\d+)?)\s*(万)?元(?!\s*(?:[-−+×*/÷=]|减|加))"
+                pattern = r"(?:应纳(?:税额|增值税|税款)|应缴(?:税额|税款)|应交税额)[^\n\d]{0,24}([\d,]+(?:\.\d+)?)\s*(万)?元(?!\s*(?:[-−+×*/÷=]|减|加))"
                 amounts = re.findall(pattern, final)
                 wrong = any(abs(float(amount.replace(",", "")) * (10000 if unit else 1) - expected) > 0.01 for amount, unit in amounts)
                 if wrong:
@@ -1012,7 +1022,7 @@ class TaxAgent(BaseAgent):
                           "calculator_checks": len(recalculated)}
         except Exception as exc:
             logger.warning("[workflow] reflection_failed=%s", type(exc).__name__)
-            final = "自我校验未完成，本轮答案未通过核验，请重试或补充政策原文。"
+            final = answer + "\n\n⚠️ 自我校验未完成，本轮未通过核验，以上为待复核草稿，请核对计算条件和政策原文。"
             reflection = {"ok": False, "changed": True, "error_type": type(exc).__name__}
         # 草稿消息由ID替换，避免错误答案留在Graph历史中影响后续。
         last = state.get("messages", [])[-1] if state.get("messages") else None
@@ -1184,7 +1194,8 @@ class TaxAgent(BaseAgent):
             return user_query
         try:
             from pathlib import Path
-            meta_path = Path(getattr(getattr(self, "registry", None), "workdir_root", ".")) / "data" / "user_documents_meta.json"
+            from services.paths import DATA_DIR
+            meta_path = DATA_DIR / "user_documents_meta.json"
             if meta_path.exists():
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 files = meta.get("files", [])
@@ -1407,6 +1418,7 @@ class TaxAgent(BaseAgent):
                     metadata={
                         "intent": result.get("primary_intent", ""),
                         "agent": "tax_agent",
+                        "context_verified": result.get("reflection", {}).get("ok", True),
                     },
                 )
             except Exception as mem_err:

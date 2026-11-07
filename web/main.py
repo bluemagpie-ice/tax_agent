@@ -883,7 +883,7 @@ async def agent_endpoint(body: TaxQueryRequest, current_user: CurrentUser = Depe
             status="success",
         )
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Agent 调用失败: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="操作失败，请稍后重试；详细原因已记录于服务端")
 @app.get("/api/search")
 def global_search_api(q: str = "", limit: int = 12, current_user: CurrentUser = Depends(get_current_user)):
     """全文搜索接口：对接本地 RAG 知识库检索。"""
@@ -909,11 +909,11 @@ def global_search_api(q: str = "", limit: int = 12, current_user: CurrentUser = 
     except Exception as e:
         logger.warning(f"[global_search_api] 搜索失败: {e}")
         return {
-            "success": True,
+            "success": False,
             "query": q,
             "results": [],
             "timestamp": datetime.now().isoformat(),
-            "message": f"搜索暂时不可用：{e}",
+            "message": "政策检索失败，结论未核验，请稍后重试",
         }
 
 @app.post("/api/tax")
@@ -950,6 +950,11 @@ async def create_knowledge_database(
     from database.repositories import KnowledgeBaseRepository
 
     name = (body.name or "").strip()
+    from knowledge.kb import validate_kb_name
+    try:
+        validate_kb_name(name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if not name:
         raise HTTPException(status_code=400, detail="知识库名称不能为空")
     if len(name) > 30:
@@ -1004,7 +1009,7 @@ async def upload_knowledge(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"文件上传失败: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="操作失败，请稍后重试；详细原因已记录于服务端")
 
 
 @app.get("/api/knowledge/files")
@@ -1022,7 +1027,7 @@ async def list_knowledge_files(include_system: bool = False, refresh_cloud: bool
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"获取文件列表失败: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="操作失败，请稍后重试；详细原因已记录于服务端")
 
 
 @app.get("/api/knowledge/files/sql")
@@ -1031,10 +1036,10 @@ async def list_knowledge_files_sql(current_user: CurrentUser = Depends(get_curre
     try:
         files = await knowledge_service.list_files_from_sql()
         visible = {f["file_id"] for f in await knowledge_service.list_files() if can_manage_file(f, current_user)}
-        files = [f for f in files if f.get("business_id") in visible]
+        files = [{key:value for key,value in f.items() if key not in ("path", "file_path")} for f in files if f.get("business_id") in visible]
         return {"success": True, "files": files, "total": len(files)}
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"获取 SQL 文件列表失败: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="操作失败，请稍后重试；详细原因已记录于服务端")
 
 
 @app.delete("/api/knowledge/files/{file_id}")
@@ -1055,12 +1060,12 @@ async def delete_knowledge_file(file_id: str, current_user: CurrentUser = Depend
                         await clear_conversation_checkpoints(sid)
         result = await knowledge_service.delete_file(file_id)
         if result.get("status") == "error":
-            raise HTTPException(status_code=404, detail=result.get("message"))
+            raise HTTPException(status_code=503, detail="文件清理未完成，请保留记录并重试")
         return result
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"删除文件失败: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="文件清理失败，请稍后重试")
 
 
 def can_manage_file(record, user, include_system=False):
@@ -1408,7 +1413,7 @@ def trigger_policy_update(current_user: CurrentUser = Depends(require_admin)):
         }
     except Exception as e:
         logger.error(f"[政策更新] 手动触发失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"政策更新失败: {e}")
+        raise HTTPException(status_code=500, detail="操作失败，请稍后重试；详细原因已记录于服务端")
 
 
 @app.get("/api/policy/status")
@@ -1491,7 +1496,7 @@ def add_policy_source(body: PolicySourceRequest, current_user: CurrentUser = Dep
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"[政策更新] 添加政策源失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"添加政策源失败: {e}")
+        raise HTTPException(status_code=500, detail="操作失败，请稍后重试；详细原因已记录于服务端")
 
 
 @app.get("/api/policy/reports")
@@ -1890,7 +1895,7 @@ async def ingest_web_search(body: WebSearchIngestRequest, current_user: CurrentU
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"联网检索入库失败: {str(e)}")
+        raise HTTPException(status_code=500, detail="操作失败，请稍后重试；详细原因已记录于服务端")
 
 
 
@@ -1919,4 +1924,4 @@ async def delete_web_search_results(file_id: str | None = None, current_user: Cu
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"删除联网检索结果失败: {str(e)}")
+        raise HTTPException(status_code=500, detail="操作失败，请稍后重试；详细原因已记录于服务端")

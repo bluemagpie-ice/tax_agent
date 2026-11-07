@@ -78,9 +78,18 @@ def calculate_vat(
     :param quarterly_sales: 小规模季度累计销售额（判断 30 万免征）
     :return: CalcResult
     """
+    import math
+    if taxpayer_type not in ("general", "small"):
+        raise ValueError("taxpayer_type 必须为 general 或 small")
+    if sales_amount is None or not math.isfinite(sales_amount) or sales_amount < 0:
+        raise ValueError("必须提供有效的非负销售额")
+    if vat_rate is not None and (not math.isfinite(vat_rate) or not 0 <= vat_rate <= 1):
+        raise ValueError("税率必须为 0 到 1 的小数")
     steps: list[CalcStep] = []
     assumptions: list[str] = []
     notes: list[str] = []
+    if taxpayer_type == "small" and quarterly_sales is None:
+        notes.append("未提供季度累计销售额，尚未核验季度免征条件；以下仅为条件计算")
 
     # ---- 1. 确定税率 ----
     if vat_rate is None:

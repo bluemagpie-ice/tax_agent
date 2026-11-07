@@ -66,15 +66,7 @@ def calculate_stamp_duty(
     notes: list[str] = []
 
     if category not in STAMP_DUTY_RATES:
-        # 尝试模糊匹配
-        notes.append(f" 未识别的税目「{category}」，请确认是否拼写正确。"
-                      f"支持的税目：{list(STAMP_DUTY_RATES.keys())}")
-        return CalcResult(
-            tax_type="stamp_duty",
-            title="印花税（计算失败）",
-            tax_amount=0.0,
-            notes=notes,
-        )
+        raise ValueError("未识别的印花税税目，请确认税目后再计算")
 
     rate = STAMP_DUTY_RATES[category]
     halve = 0.5 if is_small_scale else 1.0

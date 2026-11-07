@@ -15,7 +15,7 @@ import logging
 from typing import Optional, Literal
 
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
 from services.calculators import (
     calculate_vat,
@@ -36,7 +36,18 @@ logger = logging.getLogger(__name__)
 # 1. 增值税计算 Tool
 # ============================================================
 
-class VATInput(BaseModel):
+class CalculatorInput(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
+
+    @field_validator("*", mode="after")
+    @classmethod
+    def nonnegative(cls, value, info):
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value < 0:
+            raise ValueError(f"{info.field_name} 不能为负数")
+        return value
+
+
+class VATInput(CalculatorInput):
     """增值税计算输入参数"""
     taxpayer_type: Literal["general", "small"] = Field(
         default="general",
@@ -48,7 +59,7 @@ class VATInput(BaseModel):
     )
     input_tax: float = Field(default=0.0, description="进项税额（仅一般纳税人抵扣用）")
     vat_rate: Optional[float] = Field(
-        default=None,
+        default=None, ge=0, le=1,
         description="税率（0.13/0.09/0.06/0.03/0.01），为 None 时按纳税人类型自动取默认值",
     )
     quarterly_sales: Optional[float] = Field(
@@ -94,7 +105,7 @@ VAT_TOOL = StructuredTool.from_function(
 # 2. 企业所得税计算 Tool
 # ============================================================
 
-class CorporateIncomeInput(BaseModel):
+class CorporateIncomeInput(CalculatorInput):
     tax_type: Literal["normal", "small_low_profit", "high_tech"] = Field(
         default="normal",
         description="企业类型：normal=普通企业(25%)，small_low_profit=小型微利(分段优惠)，high_tech=高新(15%)",
@@ -142,7 +153,7 @@ CORPORATE_INCOME_TOOL = StructuredTool.from_function(
 # 3. 个人所得税（综合所得年度）计算 Tool
 # ============================================================
 
-class IndividualIncomeInput(BaseModel):
+class IndividualIncomeInput(CalculatorInput):
     annual_wage: float = Field(default=0.0, description="年度工资薪金收入")
     annual_labor: float = Field(default=0.0, description="年度劳务报酬收入（80% 计入综合所得）")
     annual_royalty: float = Field(default=0.0, description="年度稿酬收入（80%×70% 计入）")
@@ -151,7 +162,14 @@ class IndividualIncomeInput(BaseModel):
     special_additional_deduction: float = Field(
         default=0.0, description="专项附加扣除（子女教育/房贷/赡养老人等）"
     )
+    other_deduction: float = Field(default=0.0, description="其他扣除，须明确提供")
     paid_tax: float = Field(default=0.0, description="年度已预缴税额（用于汇算清缴补退）")
+    @model_validator(mode="after")
+    def require_income(self):
+        if not self.model_fields_set.intersection({"annual_wage", "annual_labor", "annual_royalty", "annual_author_fee"}):
+            raise ValueError("请明确提供至少一项年度收入，不能把缺参当成零")
+        return self
+
 
 def _tool_calculate_individual_annual(**kwargs) -> str:
     try:
@@ -168,7 +186,7 @@ INDIVIDUAL_INCOME_ANNUAL_TOOL = StructuredTool.from_function(
         "计算个人所得税综合所得年度汇算清缴。"
         "综合所得 = 工资薪金 + 劳务报酬×80% + 稿酬×80%×70% + 特许权使用费×80%。"
         "扣除项目：6 万基本减除 + 专项扣除（社保）+ 专项附加扣除（子女教育/房贷/赡养等）。"
-        "税率：5~45% 超额累进。"
+        "税率：3~45% 超额累进。"
     ),
     args_schema=IndividualIncomeInput,
     return_direct=False,
@@ -178,13 +196,20 @@ INDIVIDUAL_INCOME_ANNUAL_TOOL = StructuredTool.from_function(
 # 4. 个人所得税（月度预扣）计算 Tool
 # ============================================================
 
-class MonthlyWithholdingInput(BaseModel):
+class MonthlyWithholdingInput(CalculatorInput):
     monthly_wage: float = Field(description="本月工资薪金")
-    month_index: int = Field(description="第几月（1-12，用于累计预扣法）")
+    month_index: int = Field(ge=1, le=12, description="第几月（1-12，用于累计预扣法）")
     special_deduction_monthly: float = Field(default=0.0, description="社保公积金月度个人部分")
     special_additional_monthly: float = Field(default=0.0, description="专项附加扣除月度")
     prior_tax_withheld: float = Field(default=0.0, description="截至上月累计已预扣税额")
-    prior_income: float = Field(default=0.0, description="截至上月累计工资收入")
+    prior_income: Optional[float] = Field(default=None, description="截至上月累计工资收入，2月起必填")
+
+    @model_validator(mode="after")
+    def require_prior_income(self):
+        if self.month_index > 1 and self.prior_income is None:
+            raise ValueError("2月起计算累计预扣须提供 prior_income")
+        self.prior_income = self.prior_income or 0.0
+        return self
 
 def _tool_calculate_monthly_withholding(**kwargs) -> str:
     try:
@@ -210,7 +235,7 @@ MONTHLY_WITHHOLDING_TOOL = StructuredTool.from_function(
 # 5. 附加税费计算 Tool
 # ============================================================
 
-class SurchargesInput(BaseModel):
+class SurchargesInput(CalculatorInput):
     vat_paid: float = Field(description="实际缴纳的增值税")
     consumption_tax_paid: float = Field(default=0.0, description="实际缴纳的消费税（可选）")
     city_type: Literal["urban", "county", "other"] = Field(
@@ -243,7 +268,7 @@ SURCHARGES_TOOL = StructuredTool.from_function(
 # 6. 印花税计算 Tool
 # ============================================================
 
-class StampDutyInput(BaseModel):
+class StampDutyInput(CalculatorInput):
     category: str = Field(
         description=(
             "税目（中文），可选：买卖合同、借款合同、融资租赁合同、租赁合同、承揽合同、"
@@ -269,7 +294,7 @@ STAMP_DUTY_TOOL = StructuredTool.from_function(
     description=(
         "计算印花税（《印花税法》2022-07-01 施行）。"
         "常见税率：买卖合同/承揽合同/建设工程/运输/技术合同万分之三；"
-        "租赁合同千分之一（最低 1 元）；借款合同万分之零点五；"
+        "租赁合同千分之一（金额舍入以计算器实现为准）；借款合同万分之零点五；"
         "产权转移书据万分之五；证券交易千分之零点五（卖出方单边）。"
         "小规模减半征收。"
     ),

@@ -28,6 +28,13 @@ from services.security import blocked_document_ids
 
 logger = logging.getLogger(__name__)
 
+def validate_kb_name(name):
+    import re
+    if not isinstance(name, str) or not re.fullmatch(r"[\w -]{1,100}", name) or not name.strip():
+        raise ValueError("知识库名称仅允许字母、数字、汉字、空格、下划线和短横线")
+    return name
+
+
 class KnowledgeBase(abc.ABC):
     """
     知识库抽象基类。
@@ -47,6 +54,8 @@ class KnowledgeBase(abc.ABC):
             work_dir: 该知识库使用的工作目录（存放元数据文件等）
             kb_id:    知识库唯一标识，可为空（首次创建时生成）
         """
+        if kb_id:
+            validate_kb_name(kb_id)
         self.work_dir = work_dir
         os.makedirs(self.work_dir, exist_ok=True)
         self.kb_id = kb_id or self._generate_kb_id()

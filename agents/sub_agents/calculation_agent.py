@@ -180,6 +180,7 @@ stamp_duty 使用 category、contract_amount、is_small_scale。不要把进项�
             return None
 
         try:
+            params = _validated_params(calculator_type, params)
             return handler().to_dict()
         except TypeError as e:
             # 参数缺失 / 类型错误
@@ -230,7 +231,7 @@ stamp_duty 使用 category、contract_amount、is_small_scale。不要把进项�
                 tool_names = {"vat": "calculate_vat", "corporate_income": "calculate_corporate_income_tax",
                               "individual_annual": "calculate_individual_income_annual", "monthly_withholding": "calculate_monthly_wage_withholding",
                               "surcharges": "calculate_surcharges", "stamp_duty": "calculate_stamp_duty"}
-                params = _normalize_vat_params(raw_params) if calc_type == "vat" else (_normalize_corp_params(raw_params) if calc_type == "corporate_income" else raw_params)
+                params = _validated_params(calc_type, raw_params)
                 if calc_type in tool_names:
                     calculation = {"tool": tool_names[calc_type], "args": params,
                                    "output": json.dumps(calc_dict, ensure_ascii=False), "status": "success"}
@@ -363,8 +364,8 @@ def _normalize_vat_params(raw: dict) -> dict:
     """把 LLM 提取的 VAT 参数规范化为 calculate_vat() 的签名"""
     params = {
         "taxpayer_type": raw.get("taxpayer_type", "general") or "general",
-        "sales_amount": _safe_float(raw.get("sales_amount")),
-        "sales_is_inclusive": bool(raw.get("sales_is_inclusive", False)),
+        "sales_amount": raw.get("sales_amount"),
+        "sales_is_inclusive": raw.get("sales_is_inclusive", False),
         "input_tax": _safe_float(raw.get("input_tax")),
         "vat_rate": _safe_str(raw.get("vat_rate")),
         "quarterly_sales": _safe_str(raw.get("quarterly_sales")),
@@ -385,10 +386,20 @@ def _normalize_corp_params(raw: dict) -> dict:
     }
     return {
         "tax_type": type_mapping.get(
-            raw.get("tax_type", "normal"), "normal"
+            raw.get("tax_type", "normal"), raw.get("tax_type", "normal")
         ),
-        "taxable_income": _safe_float(raw.get("taxable_income")),
+        "taxable_income": raw.get("taxable_income"),
         "prior_loss": _safe_float(raw.get("prior_loss")),
         "rd_expense": _safe_float(raw.get("rd_expense")),
         "direct_deduction": _safe_float(raw.get("direct_deduction")),
     }
+
+
+def _validated_params(kind, raw):
+    from services.calculators.tools import ALL_TAX_TOOLS
+    names = {"vat":"calculate_vat", "corporate_income":"calculate_corporate_income_tax",
+             "individual_annual":"calculate_individual_income_annual", "monthly_withholding":"calculate_monthly_wage_withholding",
+             "surcharges":"calculate_surcharges", "stamp_duty":"calculate_stamp_duty"}
+    params = _normalize_vat_params(raw) if kind == "vat" else _normalize_corp_params(raw) if kind == "corporate_income" else raw
+    tool = next((tool for tool in ALL_TAX_TOOLS if tool.name == names.get(kind)), None)
+    return tool.args_schema.model_validate(params).model_dump(exclude_none=True) if tool else params

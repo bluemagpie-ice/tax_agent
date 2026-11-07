@@ -17,14 +17,14 @@
 | AGT-006 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | AGT-007 | P2/P3（依报告） | 待人工确认 | — | 尚未完成 | 未消除 |
 | AGT-008 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| AGT-009 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| AGT-010 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| AGT-011 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| AGT-009 | P2/P3（依报告） | 已确认但暂未修复 | services/calculators/tools.py | 修正个税税率文字、印花税最低1元误导、增加other_deduction | 经营所得Tool和部分描述仍待完善 |
+| AGT-010 | P2/P3（依报告） | 已确认并修复 | services/calculators/tools.py | 有限数、非负数、税率0..1、月份1..12、2月后prior_income必填 | 负数冲减业务不属于当前简单计算器，应明确拒绝 |
+| AGT-011 | P2/P3（依报告） | 已确认并修复 | services/calculators/vat.py | 小规模缺季度销售额时提示未核验免征条件 | 税收口径未经本次核验 |
 | AGT-012 | P2/P3（依报告） | 待人工确认 | — | 尚未完成 | 未消除 |
-| AGT-013 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| AGT-014 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| AGT-015 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| AGT-016 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| AGT-013 | P2/P3（依报告） | 已确认但暂未修复 | agents/tax_agent.py | 委托thread加入独立run_id，避免跨轮复用 | 旧派生线程清理尚未实现 |
+| AGT-014 | P2/P3（依报告） | 已确认并修复 | agents/tax_agent.py | 专业Agent使用包含补充信息的original_query | 需真实多轮验收 |
+| AGT-015 | P2/P3（依报告） | 已确认并修复 | agents/memory.py | 年份边界修正；撤回/删除重建画像 | 已丢失旧历史不可复原，旧摘要信息有限 |
+| AGT-016 | P2/P3（依报告） | 已确认并修复 | agents/tax_agent.py; agents/memory.py | 反思失败保留草稿标未核验；失败助手消息exclude_from_context | 危险建议仍由安全校验拦截，不能保留发布 |
 | AGT-017 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | AGT-018 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | AGT-019 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
@@ -36,14 +36,14 @@
 | DB-12 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | DB-13 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | DB-14 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| DB-2 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| DB-2 | P2/P3（依报告） | 已确认并修复 | web/main.py; knowledge/kb.py; knowledge/kb_manager.py | 名称白名单，API拒绝路径穿越，路径创建前二次校验 | 未改名已有库 |
 | DB-3 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | DB-4 | P2/P3（依报告） | 待运行验证 | database/models.py; services/paths.py | 默认业务库固定到项目根；保留 DATABASE_URL 覆盖；阶段1回归 56 passed | 未合并磁盘上的历史重复库 |
-| DB-5 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| DB-5 | P2/P3（依报告） | 已确认并修复 | database/models.py | SQLite连接busy_timeout=10s、WAL；40行并发测试 | 长事务仍可能等待或超时 |
 | DB-6 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | DB-7 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | DB-8 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| DB-9 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| DB-9 | P2/P3（依报告） | 已确认并修复 | services/research_cases.py | 基于原版本payload更新复核，保留确认审计字段 | 并发重复create仍待专门处理 |
 | EVAL-1 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | EVAL-2 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | EVAL-3 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
@@ -55,8 +55,8 @@
 | P0-3 | P0 | 已确认并修复 | services/calculators/individual_income.py; tests/test_audit_data_safety.py | 统一退补方向；3 个正负用例；阶段1回归 56 passed | 未调整任何税率或政策 |
 | P0-4 | P0 | 已确认并修复 | tests/test_database_init.py; tests/test_audit_data_safety.py | 删除正式库 unlink；真实初始化器内存幂等测试；阶段1回归 56 passed | 无 |
 | P1-1 | P1 | 已确认并修复 | web/main.py; web/templates/*.html; .env.example | 默认凭证拒绝；页面不内置 Token；CORS 白名单；缺头401 | 仍为两个显式配置身份，不是多用户注册系统 |
-| P1-10 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
-| P1-11 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
+| P1-10 | P1 | 已确认并修复 | agents/tax_agent.py; agents/sub_agents/calculation_agent.py | 复算异常安全降级，税额正则不匹配应纳税所得额，计算参数统一schema | 未改变反思模型本身的判断能力 |
+| P1-11 | P1 | 已确认并修复 | services/calculators/*; agents/sub_agents/calculation_agent.py | 未知税目失败、缺销售额不返回0、非法枚举拒绝 | 收入额为0必须由用户显式提供 |
 | P1-12 | P1 | 已确认并修复 | web/templates/index.html; tests/test_conversation_ui.js | 401 不切身份或 Token；会话存储按角色；独立访问凭证恢复按钮 | 需真实浏览器验收 |
 | P1-2 | P1 | 已确认并修复 | services/policy_metadata.py; knowledge/kb.py; services/tools/kb_tools.py | 显式元数据抽取+未知效力；历史缺字段不硬过滤；Research透传状态 | 生产历史payload未检查；法律时效仍须核验 |
 | P1-3 | P1 | 已确认并修复 | knowledge/policy_updater.py; knowledge/embedding.py | 新版成功后旧file_id标记 superseded，保留旧块审计；失败可重试 | 未回溯标记生产历史重复版本 |
@@ -96,7 +96,7 @@
 | RES-009 | P2/P3（依报告） | 已确认并修复 | agents/research_agent.py | unknown_kinds分类，补充事实累加，无补充skip不重复调用understand | 模型事实分类仍需真实验收 |
 | RES-010 | P2/P3（依报告） | 已确认并修复 | agents/research_agent.py | 可选计算失败降级警告；重新研究清理旧计算和告警 | 纯计算工具异常降级还需扩展 |
 | RES-011 | P2/P3（依报告） | 已确认并修复 | agents/research_agent.py | 修改报告保留case_references，只绑定报告引用的政策证据 | 人工改稿需人工承担事实审核 |
-| RES-012 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| RES-012 | P2/P3（依报告） | 已确认但暂未修复 | services/research_cases.py | 重复来源保存不同编辑时显式冲突 | 召回最低分与并发重复仍待处理 |
 | RES-013 | P2/P3（依报告） | 已确认并修复 | agents/research_agent.py | 本地检索优先且网页预算留出本地检索次数 | 极小总预算仍不能完成所有工具 |
 | RES-014 | P2/P3（依报告） | 已确认但暂未修复 | web/static/research.js | 已修运行计时、真实阶段与心跳状态；SQLite线程池/摘要查询优化待做 | 同步DB在事件循环及线程池竞争仍存在 |
 | RES-015 | P3 | 已确认并修复 | web/static/research.js; tests/test_research_ui.js | SSE error/停止刷新，running显示中文阶段 | 真实浏览器断线/停止待验收 |
@@ -117,11 +117,11 @@
 | WEB-005 | P2/P3（依报告） | 已确认并修复 | services/network_security.py; services/config_manager.py | 本地模型 origin 由服务端允许；公共模型需 HTTPS 和全局 IP | DNS rebinding 仍待处理；既有配置未改写 |
 | WEB-006 | P2/P3（依报告） | 已确认并修复 | web/templates/index.html | 令牌输入在配置读取失败时保持可用，独立验证后重新读取 | 需真实浏览器验收 |
 | WEB-007 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| WEB-008 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| WEB-008 | P2/P3（依报告） | 已确认但暂未修复 | web/main.py | 文件底层删除失败503，区分不存在；对话多资源删除仍非原子 | 部分失败仍须保留会话记录重试 |
 | WEB-009 | P2/P3（依报告） | 已确认并修复 | web/templates/index.html | /me 错误不改身份，按角色存 session_id | 历史共享 key 不再自动使用，旧会话仍在列表 |
 | WEB-010 | P2/P3（依报告） | 待运行验证 | web/templates/index.html | 重新生成先撤回服务端，成功后再提交问题 | 尚需专项浏览器测试 |
-| WEB-011 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| WEB-012 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| WEB-011 | P2/P3（依报告） | 已确认但暂未修复 | web/main.py | 检索故障success=false，错误不回显内部异常 | 统一422前端格式化与旧agent状态码仍待收口 |
+| WEB-012 | P2/P3（依报告） | 已确认并修复 | agents/tax_agent.py | 附件清单使用统一绝对DATA_DIR | 自定义多实例需对应环境变量 |
 | WEB-013 | P2/P3（依报告） | 已存在修复，无须重复修改 | web/main.py; services/config_manager.py; tests/test_settings_management.py | 保留 prepare/commit 客户端热更新；测试证明 chat/research 使用新 Key | MockTransport 不代表供应商验收 |
 | WEB-014 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | WEB-015 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
@@ -161,3 +161,9 @@ RAG/入库/分块/政策更新定向：55 passed，0 failed，0 skipped。其中
 未执行删除、去重、迁移或重建。旧payload缺效力仍为unknown；若需补齐旧数据，应先导出只读快照、生成差异清单，经人工确认后逐file_id补元数据。不得基于文号年份、发布日期推断生效日。
 
 阶段3 checkpoint：fa230ff。
+
+### 阶段 5（核心缺陷完成，跨资源删除仍有遗留）
+
+计算器/Agent/安全/撤回/知识库/案例定向：131 passed，0 failed，0 skipped。新增缺参、非法枚举、税率13、NaN、印花税未知税目、月度累计缺历史收入、反思所得额误匹配、schema异常不500、路径穿越、WAL四线程40行写入回归。仅Mock模型和临时SQLite。
+
+旧负销售额测试原本接受静默0税额，改为明确拒绝负数并提示独立调整业务路径；未改法定税率或优惠口径。阶段4 checkpoint：c51db0a。

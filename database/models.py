@@ -1,7 +1,9 @@
 import os
 from datetime import datetime
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, ForeignKey
+from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, ForeignKey, event
+from sqlalchemy.engine import Engine
+import sqlite3
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 import logging
 
@@ -122,6 +124,17 @@ class Messages(Base):
 # ========数据库连接与操作配置=========
 from services.paths import PROJECT_ROOT
 DATABASE_URL = os.getenv("DATABASE_URL") or f"sqlite:///{(PROJECT_ROOT / 'tax_agent.db').as_posix()}"
+
+
+@event.listens_for(Engine, "connect")
+def configure_sqlite(connection, record):
+    if isinstance(connection, sqlite3.Connection):
+        cursor = connection.cursor()
+        try:
+            cursor.execute("PRAGMA busy_timeout=10000")
+            cursor.execute("PRAGMA journal_mode=WAL")
+        finally:
+            cursor.close()
 
 # 创建数据库引擎
 engine = create_engine(

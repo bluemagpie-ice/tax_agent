@@ -67,7 +67,10 @@ class CaseStore:
             if existing is not None:
                 if existing == "deleted":
                     raise ResearchConflict("此报告对应案例已删除，不能由重复保存请求恢复")
-                return self.get(case_id)
+                current = self.get(case_id)
+                if current["content"] != content:
+                    raise ResearchConflict("来源报告已保存为案例，当前编辑不同；请打开已有案例修改")
+                return current
         with self.engine.begin() as conn:
             conn.execute(self.cases.insert().values(case_id=case_id, owner_id=require_tenant(), revision=1,
                 current_version=1, status="draft", source_task_id=source_task_id, created_at=utcnow(), updated_at=utcnow()))
@@ -111,7 +114,8 @@ class CaseStore:
                 self._insert_version(conn, case_id, version, parsed)
                 conn.execute(update(self.cases).where(self._owned(case_id)).values(current_version=version, published_version=None, status="draft"))
             elif action in ("consent", "professional_review"):
-                payload = {k: case[k] for k in ("content", "save_confirmed", "professional_review")}
+                payload = json.loads(conn.execute(select(self.versions.c.payload).where(
+                    self.versions.c.case_id == case_id, self.versions.c.version == version)).scalar_one())
                 if action == "consent":
                     payload.update(save_confirmed=True, save_confirmed_at=utcnow(), save_confirmed_by=require_tenant())
                 else:

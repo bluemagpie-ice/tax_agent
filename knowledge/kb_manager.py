@@ -50,7 +50,9 @@ class KnowledgeBaseManager:
         :param kb_type:  例如 "qdrant"
         :param kb_id:    具体知识库 ID；为空时每次新建
         """
-        kb_id = kb_id or f"{kb_type}_default"
+        from knowledge.kb import validate_kb_name
+        validate_kb_name(kb_type)
+        kb_id = validate_kb_name(kb_id or f"{kb_type}_default")
         bucket = self.kb_instances.setdefault(kb_type, {})
         if kb_id in bucket:
             return bucket[kb_id]
