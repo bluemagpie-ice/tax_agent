@@ -89,5 +89,13 @@ async function feed(sid,event,text) {
     await run("selectConversation('A')");await run('sendMessage()');await stopped;
     assert.equal(run('sessionStreams.size'),0);
     assert(element('chat-inner').textContent.includes('已停止'));
+    const oldFetch=context.fetch;
+    context.fetch=async()=>({ok:false,status:401,json:async()=>({detail:'认证失效'})});
+    run("currentRole='admin';AUTH_TOKEN='Bearer stale';currentSessionId='admin-session'");
+    assert.equal(await run('loadMe()'),false);
+    assert.equal(run('currentRole'),'admin');
+    assert.equal(run('AUTH_TOKEN'),'Bearer stale');
+    assert.equal(run('currentSessionId'),'admin-session');
+    context.fetch=oldFetch;
     console.log('PASS: 双会话并行、后台流式隔离、历史切换、完整结果保留、侧栏动画、当前会话停止');
 })().catch(error=>{console.error(error);process.exitCode=1;});

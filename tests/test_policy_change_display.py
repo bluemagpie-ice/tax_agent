@@ -134,7 +134,7 @@ def test_changes_api_preserves_existing_fields_and_diff(tmp_path, monkeypatch):
         monkeypatch.setattr(main, "policy_updater", updater)
         monkeypatch.setenv("AUTH_USER_TOKEN", "test_token_123")
         client = TestClient(main.app)
-        headers = {"Authorization":"Bearer test_token_123"}
+        headers = {"Authorization":"Bearer admin_token_456"}
         response = client.get("/api/policy/changes", headers=headers)
         assert response.status_code == 200
         change = response.json()["changes"][0]

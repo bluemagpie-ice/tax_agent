@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from knowledge.policy_updater import PolicyUpdater, TaxGovCnSource
 
-USER = {"Authorization":"Bearer test_token_123"}
+USER = {"Authorization":"Bearer admin_token_456"}
 
 
 def test_sources_and_schedule_survive_reconstruction(tmp_path, monkeypatch):
@@ -84,6 +84,8 @@ def test_mof_parser_uses_article_title_and_removes_style(monkeypatch):
     from unittest.mock import MagicMock
     source = TaxGovCnSource("https://szs.mof.gov.cn/zhengcefabu/")
     response = MagicMock()
+    response.status_code = 200
+    response.iter_content.side_effect = lambda size: [response.text.encode("utf-8")]
     response.headers = {"Content-Type":"text/html;charset=utf-8"}
     response.text = '<meta name="ArticleTitle" content="税务政策标题"><meta name="PubDate" content="2024-01-01"><h3>财政部微信</h3><div class="TRS_Editor"><style>.css{bad}</style><p>有效政策正文</p></div>'
     monkeypatch.setattr(source._session, "get", lambda *args, **kwargs: response)

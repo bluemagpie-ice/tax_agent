@@ -120,7 +120,7 @@
     <script>
         // 与后端 main.py 鉴权逻辑对齐
         const currentRole = sessionStorage.getItem('tax_agent_role') || 'user';
-        const AUTH_TOKEN = 'Bearer ' + (sessionStorage.getItem('tax_agent_' + currentRole + '_token') || (currentRole === 'admin' ? 'admin_token_456' : 'test_token_123'));
+        const AUTH_TOKEN = 'Bearer ' + (sessionStorage.getItem('tax_agent_' + currentRole + '_token') || (currentRole === 'admin' ? '' : ''));
 
         const testCases = [
             "餐饮发票能开专票抵扣吗？",

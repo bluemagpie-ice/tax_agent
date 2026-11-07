@@ -94,8 +94,8 @@
         const fileInput = document.getElementById('file-input');
         const fileList = document.getElementById('file-list');
         // 与后端 main.py 鉴权逻辑对齐（角色双Token体系）
-        const DEFAULT_USER_TOKEN = 'test_token_123';
-        const DEFAULT_ADMIN_TOKEN = 'admin_token_456';
+        const DEFAULT_USER_TOKEN = '';
+        const DEFAULT_ADMIN_TOKEN = '';
         const currentRole = sessionStorage.getItem('tax_agent_role') || 'user';
         function getTokenForRole(role) {
             const stored = sessionStorage.getItem('tax_agent_' + role + '_token');
@@ -241,7 +241,7 @@
                 const listResponse = await fetch('/api/conversations', {headers:{'Authorization':AUTH_TOKEN}});
                 const data = await listResponse.json();
                 if (!listResponse.ok) throw new Error(data.detail || '对话读取失败');
-                const active = new URLSearchParams(location.search).get('session_id') || localStorage.getItem('tax_agent_session_id') || 'session_' + Date.now();
+                const active = new URLSearchParams(location.search).get('session_id') || localStorage.getItem('tax_agent_session_id_' + currentRole) || 'session_' + Date.now();
                 const selector = document.getElementById('document-session');
                 selector.add(new Option('当前新对话', active));
                 (data.conversations || []).forEach(c => selector.add(new Option(c.title || c.session_id, c.session_id)));

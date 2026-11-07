@@ -57,6 +57,16 @@ def isolate_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(base, "_conversation_memory", None)
     monkeypatch.setattr(base.BaseAgent, "base_workdir", str(tmp_path / "agents"))
     monkeypatch.setattr(memory, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("TAX_AGENT_MODEL_ALLOWED_ORIGINS", "http://localhost:8000,http://localhost:6333")
+    # DNS is a test dependency, never resolve production hosts from unit tests.
+    def public_dns(host, port, *args, **kwargs):
+        import ipaddress
+        try:
+            address = str(ipaddress.ip_address(host))
+        except ValueError:
+            address = "127.0.0.1" if host == "localhost" else "93.184.216.34"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+    monkeypatch.setattr(socket, "getaddrinfo", public_dns)
     original_connect = socket.socket.connect
     def reject_network(sock, address):
         # Windows asyncio implements its self-pipe with a loopback socketpair.

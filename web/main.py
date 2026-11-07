@@ -67,6 +67,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, SecretStr, StrictBool
 from services.security import bind_tenant, reset_tenant
 from services.config_manager import ConfigManager, MODEL_PROVIDERS, validate_api_url, infer_provider
+from services.network_security import validate_outbound_url
 
 
 logger = logging.getLogger(__name__)
@@ -239,7 +240,7 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "web" / "static")), na
 # 本应用用 Bearer 头鉴权、不依赖 Cookie，故关闭 credentials。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[origin.strip() for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000").split(",") if origin.strip()],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -552,7 +553,7 @@ class PolicySourceRequest(BaseModel):
     category: str = Field("", description="政策分类标签")
 
 # 定义依赖函数，新增的修改内容
-async def get_current_user(authorization: str = Header(...)):
+async def get_current_user(authorization: str = Header(default="")):
     """
     从请求头解析 Token → 构造 CurrentUser → 绑定租户上下文 → 请求结束后自动 reset。
 
@@ -570,12 +571,12 @@ async def get_current_user(authorization: str = Header(...)):
     # 演示用 token，支持通过环境变量覆盖（生产环境务必替换为真实鉴权）
     # - AUTH_USER_TOKEN : 普通用户 token
     # - DEVELOPER_TOKEN : 开发者 token（优先），回退到 AUTH_ADMIN_TOKEN
-    user_token = os.getenv("AUTH_USER_TOKEN", "test_token_123")
-    developer_token = os.getenv("DEVELOPER_TOKEN") or os.getenv("AUTH_ADMIN_TOKEN", "admin_token_456")
+    user_token = os.getenv("AUTH_USER_TOKEN", "")
+    developer_token = os.getenv("DEVELOPER_TOKEN") or os.getenv("AUTH_ADMIN_TOKEN", "")
 
-    if raw_token == user_token:
+    if raw_token and user_token and raw_token == user_token and user_token != developer_token:
         current_user = CurrentUser(id="user_001", user_name="张三", role="user")
-    elif raw_token == developer_token:
+    elif raw_token and developer_token and raw_token == developer_token and user_token != developer_token:
         current_user = CurrentUser(id="user_000", user_name="开发者", role="admin")
     else:
         raise HTTPException(
@@ -590,6 +591,12 @@ async def get_current_user(authorization: str = Header(...)):
     finally:
         # 请求结束（无论成功/异常）都释放，防止 contextvar 跨请求污染
         reset_tenant(tenant_token)
+
+
+def require_admin(current_user: CurrentUser = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return current_user
 
 # 路由处理函数
 # 每个路由函数内部只做"参数接收 → 调用核心逻辑 → 返回结果"
@@ -1364,10 +1371,10 @@ def policy_source_from_config(data):
                                     recursive=data.get("recursive", True), category=data.get("category", ""))
     if kind == "http":
         for url in data["urls"]:
-            validate_api_url(url)
+            validate_outbound_url(url)
         return HttpCrawlSource(source_id=data["source_id"], urls=data["urls"], category=data.get("category", ""))
     url = data.get("listing_url") or (data.get("urls") or [""])[0]
-    validate_api_url(url)
+    validate_outbound_url(url)
     options = {key:data[key] for key in ("max_pages", "max_items", "link_selector", "title_selector", "content_selector", "date_selector") if key in data}
     if kind == "website":
         options.update(link_selector="a[href*='content.html'], a[href*='/t20'], a[href^='./20'], main a[href$='.html'], .list a[href$='.html']",
@@ -1381,7 +1388,7 @@ class PolicyScheduleRequest(BaseModel):
 
 
 @app.put("/api/policy/schedule")
-def set_policy_schedule(body: PolicyScheduleRequest, current_user: CurrentUser = Depends(get_current_user)):
+def set_policy_schedule(body: PolicyScheduleRequest, current_user: CurrentUser = Depends(require_admin)):
     if not policy_updater:
         raise HTTPException(status_code=503, detail="政策更新器未初始化")
     ConfigManager().save_policy_config({"interval_hours":body.interval_hours})
@@ -1389,7 +1396,7 @@ def set_policy_schedule(body: PolicyScheduleRequest, current_user: CurrentUser =
     return {"success":True, "scheduler":policy_updater.get_scheduler_status()}
 
 @app.post("/api/policy/update")
-def trigger_policy_update(current_user: CurrentUser = Depends(get_current_user)):
+def trigger_policy_update(current_user: CurrentUser = Depends(require_admin)):
     """手动触发一次政策更新扫描（扫描→去重→增量入库）"""
     if not policy_updater:
         raise HTTPException(status_code=503, detail="政策更新器未初始化")
@@ -1405,7 +1412,7 @@ def trigger_policy_update(current_user: CurrentUser = Depends(get_current_user))
 
 
 @app.get("/api/policy/status")
-def get_policy_status(current_user: CurrentUser = Depends(get_current_user)):
+def get_policy_status(current_user: CurrentUser = Depends(require_admin)):
     """获取政策更新器运行状态与最近一次更新报告"""
     if not policy_updater:
         raise HTTPException(status_code=503, detail="政策更新器未初始化")
@@ -1419,7 +1426,7 @@ def get_policy_status(current_user: CurrentUser = Depends(get_current_user)):
 
 
 @app.get("/api/policy/sources")
-def list_policy_sources(current_user: CurrentUser = Depends(get_current_user)):
+def list_policy_sources(current_user: CurrentUser = Depends(require_admin)):
     """列出所有已配置的政策源"""
     if not policy_updater:
         raise HTTPException(status_code=503, detail="政策更新器未初始化")
@@ -1430,7 +1437,7 @@ def list_policy_sources(current_user: CurrentUser = Depends(get_current_user)):
 
 
 @app.post("/api/policy/sources")
-def add_policy_source(body: PolicySourceRequest, current_user: CurrentUser = Depends(get_current_user)):
+def add_policy_source(body: PolicySourceRequest, current_user: CurrentUser = Depends(require_admin)):
     """动态添加一个政策源（本地目录 或 HTTP 抓取）"""
     if not policy_updater:
         raise HTTPException(status_code=503, detail="政策更新器未初始化")
@@ -1441,8 +1448,11 @@ def add_policy_source(body: PolicySourceRequest, current_user: CurrentUser = Dep
         if body.type == "local":
             if not body.directory:
                 raise HTTPException(status_code=400, detail="type=local 时必须提供 directory")
+            directory = Path(body.directory).resolve()
+            if not directory.is_relative_to((DATA_DIR / "policies").resolve()):
+                raise HTTPException(400, "本地政策源必须位于 data/policies 中")
             src = LocalDirectorySource(
-                directory=body.directory,
+                directory=str(directory),
                 source_id=body.source_id or f"local_{int(time.time())}",
                 recursive=body.recursive,
                 category=body.category,
@@ -1485,7 +1495,7 @@ def add_policy_source(body: PolicySourceRequest, current_user: CurrentUser = Dep
 
 
 @app.get("/api/policy/reports")
-def get_policy_reports(limit: int = 20, current_user: CurrentUser = Depends(get_current_user)):
+def get_policy_reports(limit: int = 20, current_user: CurrentUser = Depends(require_admin)):
     """获取历史更新报告列表（按时间倒序）"""
     if not policy_updater:
         raise HTTPException(status_code=503, detail="政策更新器未初始化")
@@ -1496,7 +1506,7 @@ def get_policy_reports(limit: int = 20, current_user: CurrentUser = Depends(get_
 
 
 @app.delete("/api/policy/sources/{source_id}")
-def remove_policy_source(source_id: str, current_user: CurrentUser = Depends(get_current_user)):
+def remove_policy_source(source_id: str, current_user: CurrentUser = Depends(require_admin)):
     """按 source_id 移除一个政策源"""
     if not policy_updater:
         raise HTTPException(status_code=503, detail="政策更新器未初始化")
@@ -1509,7 +1519,7 @@ def remove_policy_source(source_id: str, current_user: CurrentUser = Depends(get
 
 
 @app.get("/api/policy/changes")
-def get_policy_changes(limit: int = 20, current_user: CurrentUser = Depends(get_current_user)):
+def get_policy_changes(limit: int = 20, current_user: CurrentUser = Depends(require_admin)):
     """获取内容发生变更的政策列表"""
     if not policy_updater:
         raise HTTPException(status_code=503, detail="政策更新器未初始化")
@@ -1520,7 +1530,7 @@ def get_policy_changes(limit: int = 20, current_user: CurrentUser = Depends(get_
 
 
 @app.get("/api/policy/changes/{unique_key:path}")
-def get_policy_change_diff(unique_key: str, current_user: CurrentUser = Depends(get_current_user)):
+def get_policy_change_diff(unique_key: str, current_user: CurrentUser = Depends(require_admin)):
     """获取某条政策的文字级变更 diff"""
     if not policy_updater:
         raise HTTPException(status_code=503, detail="政策更新器未初始化")
@@ -1560,7 +1570,7 @@ def me(current_user: CurrentUser = Depends(get_current_user)):
 
 
 @app.get("/api/settings")
-def get_settings(current_user: CurrentUser = Depends(get_current_user)):
+def get_settings(current_user: CurrentUser = Depends(require_admin)):
     """获取当前模型配置（API Key 已掩码）"""
     return {
         "success": True,
@@ -1589,7 +1599,7 @@ class ChatConnectionRequest(BaseModel):
 
 
 @app.post("/api/settings/connection")
-def test_chat_connection(body: ChatConnectionRequest, current_user: CurrentUser = Depends(get_current_user)):
+def test_chat_connection(body: ChatConnectionRequest, current_user: CurrentUser = Depends(require_admin)):
     """Make an actual OpenAI-compatible inference request without saving settings."""
     from langchain_openai import ChatOpenAI
     from openai import APIConnectionError, APITimeoutError
@@ -1604,6 +1614,7 @@ def test_chat_connection(body: ChatConnectionRequest, current_user: CurrentUser 
         return result("request_error", "API Key 长度超出配置上限。")
     try:
         url = validate_api_url(body.base_url.strip())
+        validate_outbound_url(url, model=True)
         if url.rstrip("/").endswith(("/chat/completions", "/models", "/responses")):
             raise ValueError("Expected base URL")
         key = ConfigManager().resolve_model_key("llm", url, supplied_key)
@@ -1641,11 +1652,12 @@ def test_chat_connection(body: ChatConnectionRequest, current_user: CurrentUser 
 
 
 @app.post("/api/settings/models")
-def probe_models(body: ModelConnectionRequest, current_user: CurrentUser = Depends(get_current_user)):
+def probe_models(body: ModelConnectionRequest, current_user: CurrentUser = Depends(require_admin)):
     """服务端检测 OpenAI 兼容 /models；密钥不回传，也不写入配置。"""
     import requests
     try:
         url = validate_api_url(body.base_url.strip())
+        validate_outbound_url(url, model=True)
         key = ConfigManager().resolve_model_key(body.section, url, body.api_key)
         if not key:
             raise ValueError("请填写所选提供商的 API Key")
@@ -1668,7 +1680,7 @@ def probe_models(body: ModelConnectionRequest, current_user: CurrentUser = Depen
 
 
 @app.get("/api/settings/qdrant")
-def qdrant_usage(current_user: CurrentUser = Depends(get_current_user)):
+def qdrant_usage(current_user: CurrentUser = Depends(require_admin)):
     """只读监控实际点数；空间是向量 float32 裸数据估算，不是云端账单。"""
     from qdrant_client import QdrantClient
     from knowledge.embedding import QdrantService
@@ -1676,6 +1688,7 @@ def qdrant_usage(current_user: CurrentUser = Depends(get_current_user)):
     client = None
     try:
         validate_api_url(cfg["url"])
+        validate_outbound_url(cfg["url"], model=True)
         client = QdrantClient(url=cfg["url"], api_key=cfg["api_key"] or None, timeout=10,
                               check_compatibility=False)
         collection = QdrantService.COLLECTION_NAME
@@ -1711,7 +1724,7 @@ def qdrant_usage(current_user: CurrentUser = Depends(get_current_user)):
 
 
 @app.post("/api/settings")
-def update_settings(body: SettingsUpdateRequest, current_user: CurrentUser = Depends(get_current_user)):
+def update_settings(body: SettingsUpdateRequest, current_user: CurrentUser = Depends(require_admin)):
     """验证和准备客户端后再提交配置；模型保存不进行推理或向量库探测。"""
     global tax_agent
     from langchain_openai import ChatOpenAI

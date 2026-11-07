@@ -298,7 +298,8 @@ class TaxGovCnSource(PolicySource):
             url = self._build_page_url(page)
             logger.info(f"[TaxGovCnSource] 抓取列表页 {page + 1}: {url}")
             try:
-                resp = self._session.get(url, timeout=self.request_timeout)
+                from services.network_security import fetch_policy_response
+                resp = fetch_policy_response(self._session, url, self.request_timeout)
                 resp.raise_for_status()
                 resp.encoding = self._detect_encoding(resp)
                 soup = BeautifulSoup(resp.text, "lxml")
@@ -375,7 +376,8 @@ class TaxGovCnSource(PolicySource):
     def _fetch_policy_page(self, url: str) -> PolicyItem | None:
         from bs4 import BeautifulSoup
 
-        resp = self._session.get(url, timeout=self.request_timeout)
+        from services.network_security import fetch_policy_response
+        resp = fetch_policy_response(self._session, url, self.request_timeout)
         resp.raise_for_status()
         resp.encoding = self._detect_encoding(resp)
         soup = BeautifulSoup(resp.text, "lxml")

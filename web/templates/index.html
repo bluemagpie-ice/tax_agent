@@ -475,11 +475,11 @@
             <label>向量数预警上限（可自定，0 表示不设数量上限）</label><input id="cfg-qdrant-limit" type="number" min="0" step="1" value="0">
             <button class="btn" onclick="refreshQdrant(this)">🔄 刷新</button><p id="cfg-qdrant-status" role="status"></p>
             <p style="font-size:12px;color:var(--text-dim)">刷新查询已保存的地址。空间仅估算向量正文，不含索引和文档；免费版按资源限制，无固定向量数上限。切换地址不迁移数据；Embedding 必须与集合维度一致。</p>
-            <label>访问 Token（自定义鉴权时填写，留空使用演示 Token）</label><input id="cfg-auth-token" type="password" autocomplete="off">
+            <label>访问 Token（填写服务端配置的凭证）</label><input id="cfg-auth-token" type="password" autocomplete="off"><button class="btn" onclick="applyAccessToken()">验证并应用访问 Token</button>
             <p style="font-size:12px;color:var(--text-dim)">模型设置对当前服务所有会话生效；API Key 留空保留原值。</p>
             <div class="section-title" style="border-top:1px solid var(--border);padding-top:14px;margin-top:14px">🔑 身份认证 Token</div>
-            <label>普通用户 Token</label><input id="cfg-user-token" type="password" autocomplete="off" placeholder="test_token_123">
-            <label>管理员 Token</label><input id="cfg-admin-token" type="password" autocomplete="off" placeholder="admin_token_456">
+            <label>普通用户 Token</label><input id="cfg-user-token" type="password" autocomplete="off" placeholder="填写服务端配置的普通用户 Token">
+            <label>管理员 Token</label><input id="cfg-admin-token" type="password" autocomplete="off" placeholder="填写服务端配置的管理员 Token">
             <p style="font-size:12px;color:var(--text-dim);margin-top:4px">当前模式：<span id="cfg-current-role">—</span> — 保存后，在页面顶部角色按钮切换即可生效</p>
             <div class="btn-row">
                 <button class="btn btn-cancel" onclick="closeSettings()">取消</button>
@@ -491,8 +491,8 @@
 
     <script>
         // ====== 角色/Token 管理 ======
-        const DEFAULT_USER_TOKEN = 'test_token_123';
-        const DEFAULT_ADMIN_TOKEN = 'admin_token_456';
+        const DEFAULT_USER_TOKEN = '';
+        const DEFAULT_ADMIN_TOKEN = '';
         let currentRole = sessionStorage.getItem('tax_agent_role') || 'user';
 
         function getTokenForRole(role) {
@@ -508,7 +508,7 @@
         const userInput = document.getElementById('user-input');
         const sendBtn = document.getElementById('send-btn');
 
-        let currentSessionId = localStorage.getItem('tax_agent_session_id') || 'session_' + Date.now();
+        let currentSessionId = localStorage.getItem('tax_agent_session_id_' + currentRole) || 'session_' + Date.now();
         let selectedSourceTypes = ['default', 'user_upload'];
         let abortController = null;
         let autoScroll = true;
@@ -775,12 +775,28 @@
                 updateSendBtn();
             }
         }
-        function regenerate(assistantWrap) {
-            const q = lastUserQuery();
-            if (!q) { showToast('没有可重新生成的问题', true); return; }
-            assistantWrap.remove();
-            userInput.value = q;
-            sendMessage();
+        async function regenerate(assistantWrap) {
+            const q = lastUserQuery(), sid = currentSessionId, token = AUTH_TOKEN;
+            const revision = retractions.get(sid)?.revision;
+            if (!q || !Number.isInteger(revision) || !retractions.get(sid)?.can_retract
+                || sessionStreams.has(sid) || retractingSessions.has(sid) || pendingWorkflow) {
+                showToast('请刷新对话后重新生成最后一轮回复', true); return;
+            }
+            retractingSessions.add(sid); updateSendBtn();
+            try {
+                const response = await fetch(`/api/conversations/${encodeURIComponent(sid)}/messages/last?revision=${revision}`,
+                    {method:'DELETE', headers:{Authorization:token}});
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || '撤回失败');
+                if (token !== AUTH_TOKEN || sid !== currentSessionId) return;
+                const userWrap = assistantWrap.previousElementSibling;
+                assistantWrap.remove(); userWrap?.remove();
+                retractions.set(sid, data);
+                retractingSessions.delete(sid);
+                userInput.value = q;
+                await sendMessage();
+            } catch (error) { showToast(error.message, true); }
+            finally { retractingSessions.delete(sid); updateSendBtn(); }
         }
         function lastUserQuery() {
             const bubbles = chatInner.querySelectorAll('.message.user .bubble');
@@ -883,7 +899,7 @@
             const sid = currentSessionId;
             if (retractingSessions.has(sid)) return;
             retractions.delete(sid);
-            localStorage.setItem('tax_agent_session_id', sid);
+            localStorage.setItem('tax_agent_session_id_' + currentRole, sid);
             const requestToken = AUTH_TOKEN;
             const activeFiles = pendingFiles.filter(Boolean);
             if (activeFiles.some(f => f.status === 'uploading')) { showToast('文件上传中，请稍候…', true); return; }
@@ -1042,7 +1058,7 @@
             if (sessionId === currentSessionId && !restore) return;
             if (!restore) saveCurrentView();
             currentSessionId = sessionId;
-            localStorage.setItem('tax_agent_session_id', sessionId);
+            localStorage.setItem('tax_agent_session_id_' + currentRole, sessionId);
             restoreView(sessionId);
             if (conversationViews.has(sessionId)) {
                 loadConversations();
@@ -1080,7 +1096,7 @@
         function newConversation() {
             saveCurrentView();
             currentSessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).slice(2,8);
-            localStorage.setItem('tax_agent_session_id', currentSessionId);
+            localStorage.setItem('tax_agent_session_id_' + currentRole, currentSessionId);
             restoreView(currentSessionId);
             chatInner.innerHTML = `<div class="welcome" id="welcome"><h2>你好，我是税务助手</h2><p>我可以帮你解答发票合规、增值税、企业所得税、个人所得税等问题</p><div class="suggestion-grid" id="suggestion-grid"></div></div>`;
             renderSuggestions();
@@ -1299,19 +1315,19 @@
                 });
                 const result = await resp.json();
                 if (!resp.ok) throw new Error(result.detail || '切换失败');
-                showToast('模型已切换，下次对话生效');
+                showToast('模型已切换，后续请求立即生效');
             } catch (e) { showToast('切换失败', true); }
         }
 
         // ---------- 设置弹窗 ----------
         let settingsSaving = false, settingsGeneration = 0, savedSettings = null;
         function disableSettingsInputs(disabled) {
-            document.querySelectorAll('#settings-modal input, #settings-modal select').forEach(field => { field.disabled = disabled; });
+            document.querySelectorAll('#settings-modal input, #settings-modal select').forEach(field => { field.disabled = disabled && !['cfg-auth-token', 'cfg-user-token', 'cfg-admin-token'].includes(field.id); });
         }
         function showKeyState() {
             const sameAddress = document.getElementById('cfg-llm-url').value.trim().replace(/\/+$/, '')
                 === savedSettings?.llm.base_url.replace(/\/+$/, '');
-            document.getElementById('cfg-llm-key-state').textContent = sameAddress && savedSettings.llm.api_key_set
+            document.getElementById('cfg-llm-key-state').textContent = sameAddress && savedSettings?.llm.api_key_set
                 ? '已配置 API Key。留空保留，填入新 Key 可替换。'
                 : sameAddress ? '尚未配置 API Key。' : 'API 地址已变化，请确认新地址使用的 Key。';
         }
@@ -1353,7 +1369,7 @@
                 disableSettingsInputs(false);
                 document.getElementById('settings-save').disabled = false;
             } catch (e) {
-                if (generation === settingsGeneration) status.textContent = '读取配置失败，请关闭后重新打开。';
+                if (generation === settingsGeneration) status.textContent = '读取配置失败：' + e.message + '。可在下方重新验证访问 Token。';
             }
         }
         function selectProvider(prefix) {
@@ -1488,19 +1504,44 @@
 
         // ---------- 用户信息 / 角色切换 ----------
         async function loadMe() {
+            const token = AUTH_TOKEN;
             try {
-                const resp = await fetch('/api/me', { headers: { 'Authorization': AUTH_TOKEN } });
+                const resp = await fetch('/api/me', { headers: { 'Authorization': token } });
                 const data = await resp.json();
-                const isAdmin = data.role === 'admin';
-                if (isAdmin !== (currentRole === 'admin')) {
-                    currentRole = isAdmin ? 'admin' : 'user';
-                    sessionStorage.setItem('tax_agent_role', currentRole);
-                    AUTH_TOKEN = getAuthToken();
-                }
+                if (token !== AUTH_TOKEN) return false;
+                if (!resp.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '认证失败');
+                if (data.role !== currentRole) throw new Error('凭证身份与所选角色不一致，请在设置中验证访问 Token');
                 updateRoleUI();
+                return true;
             } catch (e) {
-                updateRoleUI();
+                if (token === AUTH_TOKEN) showToast(e.message + '，请打开设置更新访问 Token', true);
+                return false;
             }
+        }
+        async function applyAccessToken() {
+            if (sessionStreams.size || retractingSessions.size || window.taxResearchBusy) {
+                showToast('请先完成或停止正在执行的操作', true); return;
+            }
+            const raw = document.getElementById('cfg-auth-token').value.trim()
+                || document.getElementById(currentRole === 'admin' ? 'cfg-admin-token' : 'cfg-user-token').value.trim();
+            const status = document.getElementById('settings-save-status');
+            if (!raw) { status.textContent = '请填写访问 Token'; return; }
+            try {
+                const response = await fetch('/api/me', {headers:{Authorization:'Bearer ' + raw}});
+                const data = await response.json();
+                if (!response.ok || !['admin', 'user'].includes(data.role)) throw new Error('访问 Token 无效');
+                currentRole = data.role;
+                sessionStorage.setItem('tax_agent_role', currentRole);
+                sessionStorage.setItem('tax_agent_' + currentRole + '_token', raw);
+                AUTH_TOKEN = 'Bearer ' + raw;
+                conversationViews.clear(); retractions.clear();
+                newConversation(); conversationViews.clear();
+                window.dispatchEvent(new Event('tax-auth-changed'));
+                updateRoleUI();
+                document.getElementById('cfg-auth-token').value = '';
+                loadConversations();
+                await loadSettings(++settingsGeneration);
+            } catch (e) { status.textContent = e.message; }
         }
         function updateRoleUI() {
             const isAdmin = currentRole === 'admin';

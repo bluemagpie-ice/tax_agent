@@ -50,14 +50,14 @@
 | EVAL-4 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | EVAL-5 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | EVAL-7 | P2/P3（依报告） | 待运行验证 | tests/test_research_eval.py | 使用跟踪的 config.example.json；阶段1回归 56 passed | 完整评测尚未执行 |
-| P0-1 | P0 | 待运行验证 | — | 尚未完成 | 未消除 |
+| P0-1 | P0 | 已确认并修复 | web/main.py; services/network_security.py | 管理配置/政策读写统一 require_admin；本地来源限制目录；出站地址阻止私网和重定向，2MB 限制 | DNS 校验与连接之间仍有 rebinding 窗口，未宣称完全消除 SSRF |
 | P0-2 | P0 | 已确认并修复 | agents/memory.py; tests/test_memory.py; tests/test_audit_data_safety.py | 完整 messages + compressed_count；撤回重建摘要；上下文预算保持；阶段1回归 56 passed | 旧版已丢失历史无法恢复 |
 | P0-3 | P0 | 已确认并修复 | services/calculators/individual_income.py; tests/test_audit_data_safety.py | 统一退补方向；3 个正负用例；阶段1回归 56 passed | 未调整任何税率或政策 |
 | P0-4 | P0 | 已确认并修复 | tests/test_database_init.py; tests/test_audit_data_safety.py | 删除正式库 unlink；真实初始化器内存幂等测试；阶段1回归 56 passed | 无 |
-| P1-1 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
+| P1-1 | P1 | 已确认并修复 | web/main.py; web/templates/*.html; .env.example | 默认凭证拒绝；页面不内置 Token；CORS 白名单；缺头401 | 仍为两个显式配置身份，不是多用户注册系统 |
 | P1-10 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
 | P1-11 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
-| P1-12 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
+| P1-12 | P1 | 已确认并修复 | web/templates/index.html; tests/test_conversation_ui.js | 401 不切身份或 Token；会话存储按角色；独立访问凭证恢复按钮 | 需真实浏览器验收 |
 | P1-2 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
 | P1-3 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
 | P1-4 | P1 | 待运行验证 | — | 尚未完成 | 未消除 |
@@ -114,15 +114,15 @@
 | WEB-002 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | WEB-003 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | WEB-004 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| WEB-005 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| WEB-006 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| WEB-005 | P2/P3（依报告） | 已确认并修复 | services/network_security.py; services/config_manager.py | 本地模型 origin 由服务端允许；公共模型需 HTTPS 和全局 IP | DNS rebinding 仍待处理；既有配置未改写 |
+| WEB-006 | P2/P3（依报告） | 已确认并修复 | web/templates/index.html | 令牌输入在配置读取失败时保持可用，独立验证后重新读取 | 需真实浏览器验收 |
 | WEB-007 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | WEB-008 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| WEB-009 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| WEB-010 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| WEB-009 | P2/P3（依报告） | 已确认并修复 | web/templates/index.html | /me 错误不改身份，按角色存 session_id | 历史共享 key 不再自动使用，旧会话仍在列表 |
+| WEB-010 | P2/P3（依报告） | 待运行验证 | web/templates/index.html | 重新生成先撤回服务端，成功后再提交问题 | 尚需专项浏览器测试 |
 | WEB-011 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | WEB-012 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
-| WEB-013 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
+| WEB-013 | P2/P3（依报告） | 已存在修复，无须重复修改 | web/main.py; services/config_manager.py; tests/test_settings_management.py | 保留 prepare/commit 客户端热更新；测试证明 chat/research 使用新 Key | MockTransport 不代表供应商验收 |
 | WEB-014 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | WEB-015 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
 | WEB-016 | P2/P3（依报告） | 待运行验证 | — | 尚未完成 | 未消除 |
@@ -137,3 +137,11 @@ P0-2/3/4 已确认代码问题；修改完成，正在运行隔离回归。旧�
 阶段 1 验证：`.venv/Scripts/python.exe scripts/run_tests.py tests/test_audit_data_safety.py tests/test_memory.py tests/test_database_init.py tests/test_repositories.py tests/test_conversation_retraction.py tests/test_context_window.py -q` → **56 passed, 0 failed, 0 skipped**。包含临时 SQLite 本地集成、FastAPI TestClient；外部模型与 Qdrant 未调用。初次运行网络阻断误拦 Windows asyncio socketpair（4 failed），已限定允许标准库自身 socketpair 后全通过。
 
 兼容：messages 接口字段未改；旧 session 无 compressed_count 时从 0 开始，仅压缩未来上下文。默认数据路径不搬迁；可用 TAX_AGENT_DATA_DIR / TAX_AGENT_UPLOAD_DIR 指向独立实例。未执行任何生产迁移。
+
+### 阶段 2（核心修复完成）
+
+认证/配置/政策定向测试：63 passed，0 failed，0 skipped；Node 对话脚本通过，增加 `/me` 401 身份/凭证/会话不变断言。使用 Mock DNS、MockTransport、Mock HTTP/Qdrant 与临时配置，真实模型调用 0。旧测试以普通 Token 管理配置的断言已改为管理员，另增普通身份 403 回归。政策 HTTP Mock 现在包含状态码和流式字节。
+
+本地开发：设置不同的 AUTH_USER_TOKEN 与 DEVELOPER_TOKEN（或 AUTH_ADMIN_TOKEN），首页设置中“验证并应用访问 Token”；本地服务在 TAX_AGENT_MODEL_ALLOWED_ORIGINS 指定完整 origin。未更改真实 .env/config.json。
+
+阶段 1 checkpoint：c9daecb。

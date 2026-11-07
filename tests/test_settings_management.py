@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-USER = {"Authorization": "Bearer test_token_123"}
+USER = {"Authorization": "Bearer admin_token_456"}
 
 
 @pytest.fixture

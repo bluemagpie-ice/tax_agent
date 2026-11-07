@@ -192,6 +192,8 @@ def test_tax_gov_selector_adaptation_and_diagnostics():
     with pytest.raises(ValueError, match="link_selector.*obsolete"):
         source._select_links(BeautifulSoup("<body>无链接</body>", "lxml"))
     response = MagicMock()
+    response.status_code = 200
+    response.iter_content.side_effect = lambda size: [response.text.encode("utf-8")]
     response.headers = {}
     response.text = '<meta name="ArticleTitle" content="标题"><meta name="PubDate" content="2024-01-01 12:00:00"><div class="content">分享<div class="article">正文</div></div>'
     source._session.get = MagicMock(return_value=response)
@@ -245,7 +247,7 @@ def test_changes_api_accepts_windows_path(pipeline, monkeypatch):
     monkeypatch.setenv("AUTH_USER_TOKEN", "test_token_123")
     key = updater.tracker.get_changes()[0]["unique_key"]
     client = TestClient(main.app)
-    response = client.get("/api/policy/changes/" + quote(key, safe=""), headers={"Authorization": "Bearer test_token_123"})
+    response = client.get("/api/policy/changes/" + quote(key, safe=""), headers={"Authorization": "Bearer admin_token_456"})
     assert response.status_code == 200
     assert response.json()["unique_key"] == key and "-旧正文\n+新正文" in response.json()["diff"]
     assert client.get("/api/policy/changes/" + quote(key, safe=""), headers={"Authorization": "Bearer invalid-token"}).status_code == 401

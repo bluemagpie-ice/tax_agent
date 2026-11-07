@@ -22,6 +22,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from services.network_security import validate_outbound_url
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +249,7 @@ class ConfigManager:
                     raise ValueError("不支持的提供商")
                 if field == "base_url":
                     validate_api_url(val)
+                    validate_outbound_url(val, model=True)
                 existing[section][field] = val
 
         if isinstance(data.get("qdrant"), dict):
@@ -257,6 +259,7 @@ class ConfigManager:
             if not isinstance(url, str):
                 raise ValueError("qdrant.url 必须是字符串")
             validate_api_url(url.strip())
+            validate_outbound_url(url.strip(), model=True)
             key = incoming.get("api_key")
             if key is not None and not isinstance(key, str):
                 raise ValueError("qdrant.api_key 必须是字符串")
