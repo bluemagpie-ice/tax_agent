@@ -5,6 +5,8 @@ tests/test_web_search_tool.py
 使用 conftest.py 提供的 mock，不需要真实网络。
 """
 import json
+from unittest.mock import MagicMock
+
 import pytest
 
 from services.tools import WEB_SEARCH_TOOL
@@ -111,7 +113,9 @@ def test_delete_all_web_search_results():
 
     assert result["deleted_count"] == 1
     # 只应删除 web_search 来源对应的 file_id
-    fake_embedding.qdrant.delete_chunks_by_file_id.assert_called_once_with("web_1")
+    fake_embedding.qdrant.delete_chunks_by_file_id.assert_called_once_with(
+        "web_1", ownership={"source_type": "web_search", "owner_id": "", "scope": "", "session_id": ""}
+    )
 
 
 # ============================================================
@@ -151,3 +155,20 @@ def test_search_and_ingest_web_ingests_chunks():
     assert result["ingested"] >= 1
     assert result["file_id"].startswith("web_")
     assert fake_embedding.add_chunks.called
+
+
+def test_live_policy_lookup_prioritizes_subject_in_official_title(monkeypatch):
+    from services.tools import kb_tools
+
+    url = "https://fgk.chinatax.gov.cn/zcfgk/c100012/c12345/content.html"
+    primary = {"title": "关于进一步支持小微企业和个体工商户发展有关税费政策的公告",
+               "url": url.replace("12345", "65432")}
+    search = MagicMock(side_effect=[[
+        {"title": "保险合同企业所得税公告", "url": url.replace("12345", "45678")},
+        {"title": "落实小型微利企业所得税优惠政策的公告", "url": url},
+    ], [primary]])
+    monkeypatch.setattr(kb_tools, "search_official_research", search)
+    status, candidates = kb_tools.search_live_policy_candidates("小型微利企业有什么企业所得税优惠？")
+    assert search.call_args_list[0].args == ("小型微利企业",)
+    assert search.call_args_list[1].kwargs == {"limit": 1, "by_title": True}
+    assert status == "success" and [candidate["url"] for candidate in candidates] == [primary["url"], url]

@@ -101,6 +101,21 @@ class PolicyItem:
         """一级去重键"""
         return f"{self.source_id}::{self.item_id}"
 
+    @property
+    def mirror_hash(self) -> str | None:
+        """Compare official republications with the same explicit document number and body."""
+        import unicodedata
+
+        number = self.metadata.get("document_number")
+        if not (number and self.url and self.content):
+            return None
+        body = re.split(r"(?:\n附件\s*[:：]|特此公告[。．.])", self.content, maxsplit=1)[0]
+        def normalized(value):
+            return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value))
+
+        core = normalized(body).removeprefix(normalized(number))
+        return hashlib.sha256(f"{normalized(number)}\0{core}".encode()).hexdigest() if core else None
+
 
 class PolicySource(abc.ABC):
     """
@@ -202,10 +217,11 @@ class HttpCrawlSource(PolicySource):
         self.last_errors = []
         for url in self.urls:
             try:
-                if self.fetcher:
-                    title, content = self.fetcher(url)
-                else:
-                    title, content = self._default_fetch(url)
+                if not self.fetcher:
+                    items.append(TaxGovCnSource(url, source_id=self.source_id, category=self.category,
+                                               request_timeout=15)._fetch_policy_page(url))
+                    continue
+                title, content = self.fetcher(url)
                 if not content or not content.strip():
                     raise ValueError("正文为空")
                 items.append(PolicyItem(
@@ -221,16 +237,6 @@ class HttpCrawlSource(PolicySource):
                 self.last_errors.append(f"{url}: {e}")
         logger.info(f"[HttpCrawlSource] 抓取到 {len(items)} 条政策")
         return items
-
-    @staticmethod
-    def _default_fetch(url: str) -> tuple[str, str]:
-        """
-        默认抓取实现（纯文本）。
-        生产环境建议使用 requests + BeautifulSoup / Readability 解析。
-        """
-        source = TaxGovCnSource(url, request_timeout=15)
-        item = source._fetch_policy_page(url)
-        return item.title, item.content
 
 # ============================================================ #
 # 2. 政策入库追踪器（去重持久化）
@@ -306,7 +312,7 @@ class TaxGovCnSource(PolicySource):
                 resp = fetch_policy_response(self._session, url, self.request_timeout)
                 resp.raise_for_status()
                 resp.encoding = self._detect_encoding(resp)
-                soup = BeautifulSoup(resp.text, "lxml")
+                soup = BeautifulSoup(resp.text, "html.parser")
             except Exception as e:
                 logger.warning(f"[TaxGovCnSource] 列表页抓取失败: {url} — {e}")
                 self.last_errors.append(f"列表页 {url}: {e}")
@@ -314,7 +320,7 @@ class TaxGovCnSource(PolicySource):
 
             links_found = 0
             try:
-                links = self._select_links(soup)
+                links = self._select_links(soup, listing_url=url)
             except ValueError as e:
                 self.last_errors.append(f"列表页 {url}: {e}")
                 logger.error("%s", self.last_errors[-1])
@@ -325,16 +331,14 @@ class TaxGovCnSource(PolicySource):
                 href = a_tag.get("href", "")
                 if not href:
                     continue
-                full_url = self._resolve_url(href)
+                full_url = self._resolve_url(href, url)
                 if full_url in seen_urls:
                     continue
                 seen_urls.add(full_url)
                 links_found += 1
 
                 try:
-                    policy_item = self._fetch_policy_page(full_url)
-                    if policy_item:
-                        items.append(policy_item)
+                    items.append(self._fetch_policy_page(full_url))
                 except Exception as e:
                     logger.warning(f"[TaxGovCnSource] 正文抓取失败: {full_url} — {e}")
                     self.last_errors.append(f"正文页 {full_url}: {e}")
@@ -348,12 +352,25 @@ class TaxGovCnSource(PolicySource):
         logger.info(f"[TaxGovCnSource] 共抓取 {len(items)} 条政策")
         return items
 
-    def _select_links(self, soup) -> list:
-        links = soup.select(self.link_selector)
+    def _select_links(self, soup, listing_url=None) -> list:
+        from urllib.parse import urlparse
+
+        listing_url = listing_url or self.listing_url
+        origin = urlparse(listing_url).hostname
+        pattern = self._official_detail_pattern(origin)
+
+        def details(links):
+            for tag in links:
+                target = urlparse(self._resolve_url(tag.get("href", ""), listing_url))
+                if (target.hostname == origin and target.scheme in ("http", "https") and
+                        (pattern is None or re.fullmatch(pattern, target.path))):
+                    yield tag
+
+        links = list(details(soup.select(self.link_selector)))
         if not links:
-            links = soup.select("a[href*='/content.html']")
+            links = list(details(soup.select("a[href*='/content.html'], a[href*='t20']")))
             if links:
-                logger.warning("link_selector=%r 失效，已适配 a[href*='/content.html']", self.link_selector)
+                logger.warning("link_selector=%r 未匹配详情页，已使用官网链接规则", self.link_selector)
         if not links:
             raise ValueError(f"link_selector={self.link_selector!r} 匹配不到政策链接（已尝试法规库选择器）")
         return links
@@ -367,9 +384,17 @@ class TaxGovCnSource(PolicySource):
             return f"{base}/{name}_{page}{dot}{ext}"
         return f"{base}/index_{page}.html"
 
-    def _resolve_url(self, href: str) -> str:
-        from urllib.parse import urljoin
-        return urljoin(self.listing_url, href)
+    def _resolve_url(self, href: str, listing_url=None) -> str:
+        from urllib.parse import urljoin, urldefrag
+        return urldefrag(urljoin(listing_url or self.listing_url, href)).url
+
+    @staticmethod
+    def _official_detail_pattern(host):
+        if host == "fgk.chinatax.gov.cn":
+            return r"/zcfgk/c\d+/c\d+/content\.html"
+        if host in ("mof.gov.cn", "www.mof.gov.cn", "szs.mof.gov.cn", "gss.mof.gov.cn"):
+            return r"/(?:zhengcefabu|zhengcefabugz|zhengwuxinxi/zhengcefabu)/\d{6}/t\d{8}_\d+\.html?"
+        return None
 
     def _detect_encoding(self, resp) -> str:
         ct = resp.headers.get("Content-Type", "")
@@ -377,14 +402,19 @@ class TaxGovCnSource(PolicySource):
             return ct.split("charset=")[-1].split(";")[0].strip()
         return self.encoding
 
-    def _fetch_policy_page(self, url: str) -> PolicyItem | None:
+    def _fetch_policy_page(self, url: str) -> PolicyItem:
         from bs4 import BeautifulSoup
+        from urllib.parse import urlparse
 
         from services.network_security import fetch_policy_response
+        parsed = urlparse(url)
+        pattern = self._official_detail_pattern(parsed.hostname)
+        if pattern and not re.fullmatch(pattern, parsed.path):
+            raise ValueError("链接不是该官网的正式政策详情页")
         resp = fetch_policy_response(self._session, url, self.request_timeout)
         resp.raise_for_status()
         resp.encoding = self._detect_encoding(resp)
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(resp.text, "html.parser")
 
         title_el = soup.select_one("meta[name='ArticleTitle']") or soup.select_one(self.title_selector)
         if not title_el:
@@ -398,37 +428,64 @@ class TaxGovCnSource(PolicySource):
 
         date_el = soup.select_one(self.date_selector)
         date_text = date_el.get_text(strip=True) if date_el else ""
-        date_match = re.search(r"(\d{4}[-/年]\d{1,2}[-/月]\d{1,2})", date_text)
-        date_meta = soup.select_one("meta[name='PubDate']")
-        publish_date = date_meta.get("content", "") if date_meta else date_match.group(1) if date_match else ""
+        date_match = re.search(r"(?:发布日期|发布时间)\s*[:：]?\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2})", date_text)
+        date_meta = soup.select_one("meta[name='PubDate'], meta[property='article:published_time']")
+        publish_date = (date_meta.get("content") if date_meta else "") or (date_match.group(1) if date_match else "")
 
-        content_el = soup.select_one(self.content_selector)
+        exact_selector = ".arc_cont" if parsed.hostname == "fgk.chinatax.gov.cn" else ".TRS_Editor" if pattern else None
+        content_el = soup.select_one(exact_selector or self.content_selector)
         if not content_el:
-            content_el = soup.select_one(".article, .TRS_Editor, #zoom, #artibody")
+            # A known site must have an article body, even if an older saved selector points to its page wrapper.
+            content_el = soup.select_one(".arc_cont, .TRS_Editor, #fontzoom, #zoom, #artibody" if pattern
+                                         else ".article, .TRS_Editor, #zoom, #artibody")
             if content_el:
                 logger.warning("content_selector=%r 失效，已适配正文容器", self.content_selector)
         if content_el:
-            article = content_el.select_one(".article, .TRS_Editor, #zoom, #artibody")
+            article = content_el.select_one(".arc_cont, .TRS_Editor, #zoom, #artibody")
             if article:
                 content_el = article
-            for unwanted in content_el.select("script, style, noscript"):
+            for unwanted in content_el.select("script, style, noscript, nav, footer, header"):
                 unwanted.decompose()
         content_text = content_el.get_text("\n", strip=True) if content_el else ""
 
         if not content_text:
             raise ValueError(f"content_selector={self.content_selector!r} 匹配不到非空正文：{url}")
+        if pattern and (not re.search(r"(公告|通知|决定|批复|规定|办法|条例|细则|意见|命令|法|函|方案|规则|规程|清单|目录|第\s*\d+\s*号)[》）)\s。]*$", title)
+                        or re.match(r"^(解读|图解|一图|新闻|答记者问|关于《.+》的解读)", title)):
+            raise ValueError("标题未识别为正式政策文件")
+        if pattern and (len(content_text) < 25 or content_text.strip() == title.strip()):
+            raise ValueError("政策正文不完整，可能只提供附件或尚未加载")
+        if pattern:
+            subject = re.split(r"关于|印发", title, maxsplit=1)[-1]
+            if not re.search(r"增值税|消费税|所得税|购置税|关税|印花税|房产税|契税|土地使用税|税收|税费|涉税|"
+                             r"纳税|退税|征税|免税|发票|征管|征收|税务执法|税务机关|社保费|非税收入|缴费",
+                             subject + "\n" + content_text):
+                raise ValueError("详情页未识别为税费政策")
 
         item_id = self._extract_item_id(url)
+        from services.policy_metadata import extract_policy_metadata
 
-        return PolicyItem(
+        number = soup.select_one(".actfwzh")
+        metadata = {"url": url, "publish_date": publish_date, "source_name": self.category or parsed.hostname}
+        if number and number.get_text(strip=True):
+            metadata["document_number"] = number.get_text(" ", strip=True)
+        else:
+            explicit = extract_policy_metadata(content_text.split("\n", 1)[0]).get("document_number")
+            if explicit:
+                metadata["document_number"] = explicit
+
+        item = PolicyItem(
             source_id=self.source_id,
             item_id=item_id,
             title=title or item_id,
             content=content_text,
             url=url,
             category=self.category,
-            metadata={"url": url, "publish_date": publish_date},
+            metadata=metadata,
         )
+        if not item.published_date:
+            raise ValueError("缺少明确的发布日期")
+        return item
 
     @staticmethod
     def _extract_item_id(url: str) -> str:
@@ -503,30 +560,50 @@ class PolicyTracker:
             if "filtered" not in report_columns:
                 self._conn.execute("ALTER TABLE update_report ADD COLUMN filtered INTEGER DEFAULT 0")
             policy_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(policy_record)")}
+            self._conn.execute("CREATE TABLE IF NOT EXISTS policy_deletions (file_id TEXT PRIMARY KEY)")
+            self._conn.execute("CREATE TABLE IF NOT EXISTS policy_update_state (id INTEGER PRIMARY KEY, paused INTEGER NOT NULL)")
             # SQLite 不支持 ADD COLUMN IF NOT EXISTS；检查列后再 ALTER，重复启动可安全迁移。
             for column in ("previous_content_hash", "content_snapshot", "previous_content_snapshot",
                            "published_date", "source_url", "source_name"):
                 if column not in policy_columns:
                     self._conn.execute(f"ALTER TABLE policy_record ADD COLUMN {column} TEXT")
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS policy_version (
+                    unique_key TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    file_id TEXT,
+                    previous_hash TEXT,
+                    content_snapshot TEXT,
+                    mirror_hash TEXT,
+                    PRIMARY KEY (unique_key, content_hash)
+                )
+            """)
+            version_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(policy_version)")}
+            if "mirror_hash" not in version_columns:
+                self._conn.execute("ALTER TABLE policy_version ADD COLUMN mirror_hash TEXT")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS policy_version_hash ON policy_version(content_hash)")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS policy_version_mirror ON policy_version(mirror_hash)")
+            self._conn.execute("""
+                INSERT OR IGNORE INTO policy_version(unique_key, content_hash, file_id, previous_hash, content_snapshot)
+                SELECT unique_key, content_hash, file_id, previous_content_hash, content_snapshot
+                FROM policy_record WHERE status IN ('ingested', 'deleted') AND content_hash IS NOT NULL
+            """)
+            self._conn.execute("""
+                INSERT OR IGNORE INTO policy_version(unique_key, content_hash, file_id, previous_hash, content_snapshot)
+                SELECT unique_key, previous_content_hash,
+                       CASE WHEN status IN ('pending', 'failed') THEN file_id END,
+                       NULL, previous_content_snapshot
+                FROM policy_record WHERE previous_content_hash IS NOT NULL AND previous_content_snapshot IS NOT NULL
+            """)
             self._conn.commit()
 
     # ---------- 查询 ---------- #
     def exists(self, item: PolicyItem) -> bool:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT 1 FROM policy_record WHERE unique_key = ? AND content_hash = ? AND status = 'ingested'",
-                (item.unique_key, item.content_hash),
-            ).fetchone()
-            if row:
-                return True
-            # 二级：内容哈希
-            if item.content_hash:
-                row2 = self._conn.execute(
-                    "SELECT 1 FROM policy_record WHERE content_hash = ? AND status = 'ingested'",
-                    (item.content_hash,),
-                ).fetchone()
-                return row2 is not None
-            return False
+            return self._conn.execute(
+                """SELECT 1 FROM policy_version WHERE content_hash=? OR (mirror_hash=? AND unique_key<>?) LIMIT 1""",
+                (item.content_hash, item.mirror_hash, item.unique_key)
+            ).fetchone() is not None
 
 
     def get_pending(self, limit: int = 500) -> list[sqlite3.Row]:
@@ -542,21 +619,23 @@ class PolicyTracker:
 
         Returns (is_new, is_changed)
         """
-        with self._lock:
+        with self._lock, self._conn:
             if not item.unique_key or not item.content_hash:
                 return False, False
             key = item.unique_key
+            file_id = self.ingest_file_id(item)
+            if self._conn.execute("SELECT 1 FROM policy_deletions WHERE file_id=?", (file_id,)).fetchone():
+                return False, False
             now = datetime.now().isoformat(timespec="seconds")
             snapshot = content_text or item.content or ""
 
             existing = self._conn.execute(
                 "SELECT * FROM policy_record WHERE unique_key = ?", (key,)
             ).fetchone()
+            if (existing is None or existing["content_hash"] != item.content_hash) and self.exists(item):
+                return False, False
 
             if existing is None:
-                if self._conn.execute("SELECT 1 FROM policy_record WHERE content_hash=? AND status='ingested'",
-                                      (item.content_hash,)).fetchone():
-                    return False, False
                 self._conn.execute(
                     """INSERT INTO policy_record
                        (unique_key, source_id, item_id, title, content_hash, status, content_snapshot, created_at,
@@ -579,7 +658,7 @@ class PolicyTracker:
                  item.metadata.get("source_name") or item.metadata.get("issuer") or item.category, key),
             )
             if old_hash == item.content_hash:
-                if existing["status"] == "ingested":
+                if existing["status"] in ("ingested", "deleted"):
                     self._conn.commit()
                     return False, False
                 self._conn.execute("UPDATE policy_record SET status='pending' WHERE unique_key=?", (key,))
@@ -602,18 +681,49 @@ class PolicyTracker:
             self._conn.commit()
             return True, True
 
-    def mark_ingested(self, unique_key: str, file_id: str = "") -> None:
-        with self._lock:
+    def mark_ingested(self, unique_key: str, file_id: str = "", *, mirror_hash=None) -> None:
+        with self._lock, self._conn:
             self._conn.execute(
                 "UPDATE policy_record SET status='ingested', file_id=? WHERE unique_key=?",
                 (file_id, unique_key),
             )
-            self._conn.commit()
+            self._conn.execute("""
+                INSERT OR IGNORE INTO policy_version
+                SELECT unique_key, content_hash, file_id, previous_content_hash, content_snapshot, ?
+                FROM policy_record WHERE unique_key=?
+            """, (mirror_hash, unique_key))
 
     def file_id_for(self, unique_key: str) -> str:
         with self._lock:
-            row = self._conn.execute("SELECT file_id FROM policy_record WHERE unique_key=?", (unique_key,)).fetchone()
+            row = self._conn.execute("""SELECT file_id FROM policy_record WHERE unique_key=?
+                AND file_id NOT IN (SELECT file_id FROM policy_deletions)""", (unique_key,)).fetchone()
             return (row[0] or "") if row else ""
+
+    @staticmethod
+    def ingest_file_id(item):
+        return "policy_" + hashlib.sha256(f"{item.unique_key}\0{item.content_hash}".encode("utf-8")).hexdigest()[:32]
+
+    def suppress_file(self, file_id):
+        with self._lock, self._conn:
+            self._conn.execute("INSERT OR IGNORE INTO policy_deletions (file_id) VALUES (?)", (file_id,))
+            self._conn.execute("UPDATE policy_version SET content_snapshot=NULL WHERE file_id=?", (file_id,))
+            self._conn.execute("""UPDATE policy_record SET status='deleted', content_snapshot=NULL
+                                  WHERE file_id=? AND status='ingested'""", (file_id,))
+
+    def source_path_for_file(self, file_id):
+        with self._lock:
+            row = self._conn.execute("SELECT item_id FROM policy_record WHERE file_id=? AND status='ingested'",
+                                     (file_id,)).fetchone()
+            return row[0] if row and Path(row[0]).is_absolute() else None
+
+    def set_paused(self, paused):
+        with self._lock, self._conn:
+            self._conn.execute("INSERT OR REPLACE INTO policy_update_state (id, paused) VALUES (1, ?)", (int(paused),))
+
+    def is_paused(self):
+        with self._lock:
+            row = self._conn.execute("SELECT paused FROM policy_update_state WHERE id=1").fetchone()
+            return bool(row and row[0])
 
     def mark_failed(self, unique_key: str) -> None:
         with self._lock:
@@ -867,6 +977,9 @@ class PolicyUpdater:
             started_at = datetime.now().isoformat(timespec="seconds")
             report = UpdateReport(started_at=started_at, finished_at="")
 
+            if self.tracker.is_paused():
+                report.finished_at = datetime.now().isoformat(timespec="seconds")
+                return report
             if not self._sources:
                 logger.warning("未配置任何政策源，跳过本次更新")
                 report.finished_at = datetime.now().isoformat(timespec="seconds")
@@ -892,20 +1005,28 @@ class PolicyUpdater:
 
             # Step 2: 去重 + 记录 pending
             pending_items: list[PolicyItem] = []
-            seen_keys, seen_hashes = set(), set()
+            seen_keys, seen_hashes, seen_mirrors = set(), set(), set()
             for item in all_items:
                 if self.since_date and (not item.published or item.published.date() < self.since_date):
                     report.filtered += 1
                     if not item.published:
                         report.errors.append(f"{item.unique_key}: 缺少发布日期，无法确认时间窗口，未入库")
                     continue
-                if item.unique_key in seen_keys or item.content_hash in seen_hashes:
+                mirror_hash = item.mirror_hash
+                if item.unique_key in seen_keys or item.content_hash in seen_hashes or mirror_hash in seen_mirrors:
                     report.duplicated += 1
                     continue
                 seen_keys.add(item.unique_key)
                 seen_hashes.add(item.content_hash)
-                content_text = item.content or ""
-                is_new, is_changed = self.tracker.upsert_pending(item, content_text)
+                if mirror_hash:
+                    seen_mirrors.add(mirror_hash)
+                try:
+                    is_new, is_changed = self.tracker.upsert_pending(item, item.content or "")
+                except sqlite3.Error as exc:
+                    report.failed += 1
+                    report.errors.append(f"{item.unique_key}: 政策追踪记录保存失败（{type(exc).__name__}）")
+                    logger.exception("政策追踪记录保存失败：%s", item.unique_key)
+                    continue
                 if is_new:
                     pending_items.append(item)
                     if is_changed:
@@ -925,11 +1046,14 @@ class PolicyUpdater:
                     result = self._ingest_item(item)
                     if result.get("status") != "success" or result.get("chunk_count", 0) < 1:
                         raise RuntimeError(result.get("message") or "政策入库未返回有效分块")
-                    self.tracker.mark_ingested(item.unique_key, file_id=item.metadata.get("file_id", ""))
+                    self.tracker.mark_ingested(item.unique_key, file_id=item.metadata.get("file_id", ""), mirror_hash=item.mirror_hash)
                     report.ingested += 1
                 except Exception as e:
                     logger.error(f"入库失败 {item.unique_key}: {e}")
-                    self.tracker.mark_failed(item.unique_key)
+                    try:
+                        self.tracker.mark_failed(item.unique_key)
+                    except sqlite3.Error as tracker_error:
+                        report.errors.append(f"{item.unique_key}: 无法保存入库失败状态（{type(tracker_error).__name__}）")
                     report.failed += 1
                     report.errors.append(f"{item.unique_key}: {e}")
 
@@ -1001,14 +1125,17 @@ class PolicyUpdater:
         import asyncio
 
         file_path = override_path or item.file_path
-        file_id = "policy_" + hashlib.sha256(f"{item.unique_key}\0{item.content_hash}".encode("utf-8")).hexdigest()[:32]
+        file_id = PolicyTracker.ingest_file_id(item)
+        if any(record.get("file_id") == file_id and record.get("status") in ("deleting", "delete_failed")
+               for record in getattr(kb, "_metadata", {}).get("files", [])):
+            raise RuntimeError("政策删除未完成，等待管理员重试清理")
         from services.research_evidence import POLICY_METADATA_FIELDS
         params = {key: item.metadata[key] for key in
                   POLICY_METADATA_FIELDS
                   if key in item.metadata}
         params["source_url"] = item.url or item.metadata.get("source_url") or item.metadata.get("url", "")
         if item.published_date:
-            params.setdefault("publish_date", item.published_date)
+            params["publish_date"] = item.published_date
         params.update(file_id=file_id, chunk_preset_id=self.chunk_preset_id, title=item.title,
                       source_type=item.metadata.get("source_type", "default"),
                       scope=item.metadata.get("scope", "system"), file_name=Path(item.file_path or file_path).name)
@@ -1030,9 +1157,26 @@ class PolicyUpdater:
 
         previous_id = self.tracker.file_id_for(item.unique_key)
         if previous_id and previous_id != file_id:
-            # Preserve all old chunks for audit; never delete/rebuild the collection.
-            replacement = {"is_current": False, "superseded_by": file_id, "validity_check": "superseded"}
-            kb._ensure_embedding().qdrant.set_file_metadata(previous_id, replacement)
+            # 版本关系只用于索引和追溯，不推断原文件的法律效力。
+            replacement = {"superseded_by": file_id}
+            embedding = kb._ensure_embedding()
+            store = getattr(embedding, "store", None)
+            from knowledge.embedding import ChunkDocument
+            from knowledge.kb import document_ownership, is_system_policy
+
+            chunks = [chunk for chunk in store.get_chunks() if chunk.file_id == previous_id] if store else []
+            if is_system_policy(params):
+                matches = is_system_policy
+                ownership = {"system_policy": True}
+            else:
+                matches = lambda metadata: document_ownership(metadata) == document_ownership(params)
+                ownership = {"ownership": params}
+            if any(not matches(chunk.metadata) for chunk in chunks):
+                raise RuntimeError("旧版本文件 ID 对应不同归属的本地分块")
+            embedding.qdrant.set_file_metadata(previous_id, replacement, **ownership)
+            if chunks:
+                store.add_chunks([ChunkDocument(chunk.id, chunk.content, previous_id, {**chunk.metadata, **replacement})
+                                  for chunk in chunks])
             for record in getattr(kb, "_metadata", {}).get("files", []):
                 if record.get("file_id") == previous_id:
                     record.setdefault("tax_metadata", {}).update(replacement)

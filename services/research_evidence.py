@@ -108,6 +108,9 @@ def compact_evidence(evidence, focus=""):
         yield {**{key: record.get(key) for key in keys}, "content": content}
 
 
+EVIDENCE_GAP_CODES = {"insufficient_evidence", "policy_source_unverified"}
+
+
 def legacy_failed_report(data):
     scope = (data.get("report") or {}).get("scope", "")
     return scope in {"初稿校验失败且修正预算耗尽", "预算耗尽，研究尚未完成"}

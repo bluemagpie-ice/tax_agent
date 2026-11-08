@@ -153,6 +153,52 @@ def test_retrieval_replans_once_and_stops_on_no_new_evidence(tmp_path):
     asyncio.run(verify())
 
 
+@pytest.mark.parametrize(("search_errors", "status", "code"), [
+    (False, "insufficient_evidence", "insufficient_evidence"),
+    (True, "failed", "retrieval_failed"),
+])
+def test_empty_knowledge_and_retrieval_failure_have_distinct_outcomes(tmp_path, search_errors, status, code):
+    def search(*args, **kwargs):
+        if search_errors:
+            raise ConnectionError("test vector backend unavailable")
+        return []
+
+    async def verify():
+        with tenant_scope("alice"):
+            store = ResearchStore(create_engine(f"sqlite:///{tmp_path / 'empty.sqlite'}"))
+            task = store.create("模拟业务", budget={"clarifications": 0, "research_rounds": 1})
+            async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "empty-graph.sqlite")) as saver:
+                agent = ResearchAgent(store, llm=ScriptedModel([understanding()]), search=search, workdir_root=tmp_path)
+                agent._checkpointer = saver
+                result = await agent.execute(task["task_id"], task["revision"])
+                assert result["status"] == status and result["failure"]["code"] == code
+                assert not result.get("report") and not store.history(task["task_id"])
+                assert result["metrics"]["tool_calls"][0]["status"] == ("error" if search_errors else "empty")
+    asyncio.run(verify())
+
+
+def test_research_skips_embeddings_when_policy_collection_is_missing_or_empty(monkeypatch):
+    from knowledge.embedding import EmbeddingService, QdrantService
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance, PointStruct, VectorParams
+    from services.tools.kb_tools import search_tax_policy
+
+    client = QdrantClient(":memory:")
+    cloud = QdrantService(read_only=True, config={"url":"http://localhost:6333", "api_key":""}, client=client)
+    monkeypatch.setattr("knowledge.embedding.QdrantService", lambda **kwargs: cloud)
+    monkeypatch.setattr(EmbeddingService, "_embed_texts", lambda *args: pytest.fail("empty corpus must not call embedding"))
+    try:
+        assert search_tax_policy("missing policy collection", research=True) == []
+        client.create_collection(cloud.COLLECTION_NAME, vectors_config=VectorParams(size=4, distance=Distance.COSINE))
+        assert search_tax_policy("empty policy collection", research=True) == []
+        client.upsert(cloud.COLLECTION_NAME, [PointStruct(id=1, vector=[1., 0., 0., 0.],
+                                                          payload={"source_type":"user_upload", "scope":"global"})])
+        assert search_tax_policy("only personal files", research=True) == []
+        assert client.count(cloud.COLLECTION_NAME).count == 1
+    finally:
+        client.close()
+
+
 def test_first_research_saved_case_second_research_revalidates_policy(tmp_path):
     from services.research_candidate import candidate_from_task
     async def verify():
@@ -240,7 +286,7 @@ def test_dated_core_evidence_rejects_old_policy_and_ignores_unrelated_candidates
                                       search=lambda *a, **k: [old, old, POLICY], workdir_root=tmp_path)
                 agent._checkpointer = saver
                 result = await agent.execute(task["task_id"], task["revision"])
-                assert result["status"] == "failed" and result["failure"]["code"] == "insufficient_evidence"
+                assert result["status"] == "insufficient_evidence" and result["failure"]["code"] == "insufficient_evidence"
                 assert len(result["candidates"]) == 2 and len(result["evidence"]) == 1
                 assert result["completed_questions"] == 0
                 assert "所属期" in result["assessment"]["coverage"][0]["gap"]

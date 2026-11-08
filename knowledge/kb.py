@@ -18,6 +18,7 @@ import abc
 import json
 import logging
 import os
+import re
 import asyncio
 import threading
 from pathlib import Path
@@ -27,6 +28,19 @@ from services.security import blocked_document_ids
 
 
 logger = logging.getLogger(__name__)
+
+def is_system_policy(metadata):
+    # 系统上传会记录管理员 ID。旧版默认政策没有 scope，也没有所有者。
+    return metadata.get("source_type") == "default" and (
+        metadata.get("scope") == "system" or
+        (metadata.get("scope") in (None, "") and not metadata.get("owner_id"))
+    )
+
+
+def document_ownership(metadata):
+    """个人文件和旧版联网批次都按写入时的所有者、来源和作用域匹配。"""
+    return {field: metadata.get(field) or "" for field in ("source_type", "owner_id", "scope", "session_id")}
+
 
 def validate_kb_name(name):
     import re
@@ -163,6 +177,7 @@ class QdrantKnowledgeBase(KnowledgeBase):
         from services.paths import UPLOAD_DIR
         self.upload_root = UPLOAD_DIR
         self._embedding_lock = threading.Lock()
+        self._active_ingests = set()
         if self.kb_id == "user_documents" and not self._metadata.get("legacy_imported"):
             existing = {f["file_id"]: f for f in self._metadata.get("files", [])}
             for path in Path(work_dir).glob("*_meta.json"):
@@ -226,13 +241,29 @@ class QdrantKnowledgeBase(KnowledgeBase):
         """先保留文件记录；部分入库失败也能在管理页找到并删除。"""
         import uuid
         file_id = kwargs.setdefault("file_id", f"file_{uuid.uuid4().hex}")
+        if file_id in self._active_ingests:
+            raise RuntimeError("该文件正在入库")
+        self._active_ingests.add(file_id)
+        try:
+            return await self._record_ingest(file_path, **kwargs)
+        finally:
+            self._active_ingests.discard(file_id)
+
+    async def _record_ingest(self, file_path, **kwargs):
+        file_id = kwargs["file_id"]
         record = {"file_id": file_id, "file_name": kwargs.get("file_name") or Path(file_path).name,
                   "file_path": file_path, "chunk_count": 0, "status": "uploading",
+                  "vector_write_started": False,
                   "managed_upload": kwargs.get("managed_upload", False),
                   "tax_metadata": {key: kwargs[key] for key in ("owner_id", "scope", "session_id", "source_type") if key in kwargs}}
         files = self._metadata.setdefault("files", [])
         existing = next((item for item in files if item["file_id"] == file_id), None)
         if existing:
+            if existing.get("status") in ("deleting", "delete_failed"):
+                raise RuntimeError("该文件正在删除或等待删除重试")
+            if document_ownership(existing.get("tax_metadata", {})) != document_ownership(record["tax_metadata"]):
+                raise RuntimeError("文件 ID 对应不同归属的入库记录")
+            record["vector_write_started"] = existing.get("vector_write_started", True)
             existing.update(record)
             record = existing
         else:
@@ -245,15 +276,16 @@ class QdrantKnowledgeBase(KnowledgeBase):
                 record["status"] = "upload_failed"
                 self.save_metadata()
                 return result
-            record["status"] = "active"
-            self.save_metadata()
             embedding = self._ensure_embedding()
             if embedding.qdrant is not None:
-                await asyncio.to_thread(embedding.qdrant.set_file_metadata, file_id, {"status": "active"})
-            for chunk in embedding.store.get_chunks():
-                if chunk.file_id == file_id:
-                    chunk.metadata["status"] = "active"
+                await asyncio.to_thread(embedding.qdrant.set_file_metadata, file_id, {"status": "active"},
+                                        ownership=result["tax_metadata"])
+            from knowledge.embedding import ChunkDocument
+            active_chunks = [ChunkDocument(chunk.id, chunk.content, file_id, {**chunk.metadata, "status": "active"})
+                             for chunk in embedding.store.get_chunks() if chunk.file_id == file_id]
+            await asyncio.to_thread(embedding.store.add_chunks, active_chunks)
             record["tax_metadata"]["status"] = "active"
+            record["status"] = "active"
             self.save_metadata()
             blocked_document_ids.discard(file_id)
             from services.tools.kb_tools import _search_cache
@@ -319,6 +351,11 @@ class QdrantKnowledgeBase(KnowledgeBase):
                           metadata={**tax_metadata, "chunk_index": c["chunk_index"], "articles": c.get("articles", [])})
             for c in chunks
         ]
+        if embedding.qdrant is not None:
+            await asyncio.to_thread(embedding.qdrant.assert_document_ownership, file_id, ownership=tax_metadata)
+            record = next(f for f in self._metadata["files"] if f["file_id"] == file_id)
+            record["vector_write_started"] = True
+            self.save_metadata()
         await asyncio.to_thread(embedding.add_chunks, documents)
         await asyncio.to_thread(embedding.store.add_chunks, documents)
 
@@ -346,34 +383,70 @@ class QdrantKnowledgeBase(KnowledgeBase):
         embedding = self._ensure_embedding()
         return embedding.search(query=query, limit=limit)
 
-    async def delete_file(self, file_id: str, finalize=None) -> bool:
+    def local_file_path(self, record: dict) -> Path | None:
+        stored = record.get("file_path")
+        if not stored:
+            return None
+        path = Path(stored).absolute()
+        if not record.get("managed_upload"):
+            return path
+        root = self.upload_root.resolve()
+        if not path.is_relative_to(root):
+            # A relocated checkout can carry an old absolute path. Match only our
+            # generated upload name and address the copy in this instance's root.
+            name = Path((record.get("filename") or record.get("file_name") or "").replace("\\", "/")).name
+            if (not Path(stored).is_absolute() or path.parent.name.casefold() not in {"uploads", root.name.casefold()}
+                    or not name or not re.fullmatch(r"\d{8}_\d{6}_[0-9a-f]{32}_" + re.escape(name), path.name)):
+                return None
+            path = root / path.name
+        return path if path.resolve().is_relative_to(root) else None
+
+    async def delete_file(self, file_id: str, finalize=None, *, system_policy=False, policy_paths=(), preserve_path=False) -> bool:
         """
         删除指定文件：元数据 + Qdrant 向量 + 内存 store 全链路清理
 
         Returns:
             True 表示全链路完成；False 表示该 file_id 不存在；失败抛异常并保留重试记录。
         """
-        deleted_any = False
-
         # 1. 清理元数据
         files = self._metadata.get("files", [])
         record = next((f for f in files if f.get("file_id") == file_id), None)
         if record is None:
             return False
-        if record.get("status") == "uploading":
+        if file_id in self._active_ingests:
             raise RuntimeError("文档仍在入库，请等待处理结束后删除")
-        file_path = record.get("file_path")
+        metadata = record.get("tax_metadata", {})
+        if system_policy and not is_system_policy(metadata):
+            raise RuntimeError("文件归属不是系统政策，已停止删除")
+        file_path = self.local_file_path(record)
+        if record.get("managed_upload") and record.get("file_path") and file_path is None:
+            raise RuntimeError("无法确认当前上传目录中的文件位置，已停止删除")
+        original_status = record.get("status", "active")
+        was_blocked = file_id in blocked_document_ids
         record["status"] = "deleting"
         blocked_document_ids.add(file_id)
         self.save_metadata()
 
         # 2. 清理 Qdrant 向量（按 payload.file_id 过滤）
+        from knowledge.embedding import PolicyOwnershipConflict
         try:
             embedding = await asyncio.to_thread(self._ensure_embedding)
-            if embedding.qdrant is None:
+            ownership = document_ownership(metadata)
+            matches = is_system_policy if system_policy else lambda value: document_ownership(value) == ownership
+            local_chunks = [c for c in embedding.store.get_chunks() if c.file_id == file_id]
+            if any(not matches(c.metadata) for c in local_chunks):
+                raise PolicyOwnershipConflict("本地分块归属冲突，已停止删除")
+            if embedding.qdrant is not None:
+                options = {"system_policy": True} if system_policy else {"ownership": ownership}
+                await asyncio.to_thread(embedding.qdrant.delete_chunks_by_file_id, file_id, **options)
+            elif record.get("vector_write_started") is not False or local_chunks:
                 raise RuntimeError("Qdrant 未连接，无法确认云端文档已删除")
-            qdrant_removed = await asyncio.to_thread(embedding.qdrant.delete_chunks_by_file_id, file_id)
-            deleted_any = qdrant_removed > 0
+        except PolicyOwnershipConflict:
+            record["status"] = original_status
+            if not was_blocked:
+                blocked_document_ids.discard(file_id)
+            self.save_metadata()
+            raise
         except Exception as e:
             logger.error(f"[delete_file] Qdrant 删除失败: {e}")
             record["status"] = "delete_failed"
@@ -383,7 +456,7 @@ class QdrantKnowledgeBase(KnowledgeBase):
         # 3. 清理内存 store（通过类方法操作类级别共享列表 + 同步到磁盘文件）
         try:
             from knowledge.embedding import PersistentDocumentStore
-            removed_from_store = PersistentDocumentStore.remove_by_file_id(file_id)
+            removed_from_store = await asyncio.to_thread(PersistentDocumentStore.remove_by_file_id, file_id)
             if removed_from_store > 0:
                 logger.info(
                     f"[delete_file] 内存 store 清理了 {removed_from_store} 个 chunk"
@@ -395,16 +468,16 @@ class QdrantKnowledgeBase(KnowledgeBase):
             raise
 
         # 4. 清理磁盘上的原始文件
-        if file_path:
+        if file_path and not preserve_path:
             try:
-                path = Path(file_path).resolve()
+                path = file_path.resolve()
                 if record.get("managed_upload") and not path.is_relative_to(self.upload_root.resolve()):
                     raise RuntimeError("上传文件路径不在管理目录内，删除未完成")
                 # 管理员预置源代码资料保留，下面记录停用，防止重启复活。
-                if path.is_relative_to(self.upload_root.resolve()) and os.path.isfile(path):
-                    os.remove(file_path)
+                managed = path.is_relative_to(self.upload_root.resolve()) or any(path.is_relative_to(root) for root in policy_paths)
+                if managed and os.path.isfile(path):
+                    await asyncio.to_thread(os.remove, file_path)
                     logger.info(f"[delete_file] 已删除磁盘文件: {file_path}")
-                    deleted_any = True
             except Exception as e:
                 logger.error(f"[delete_file] 磁盘文件删除失败: {e}")
                 record["status"] = "delete_failed"
@@ -413,7 +486,7 @@ class QdrantKnowledgeBase(KnowledgeBase):
 
         try:
             if finalize is not None:
-                await asyncio.to_thread(finalize)
+                await finalize()
         except Exception:
             record["status"] = "delete_failed"
             self.save_metadata()
@@ -423,6 +496,7 @@ class QdrantKnowledgeBase(KnowledgeBase):
             if file_id not in disabled:
                 disabled.append(file_id)
         # 1. 所有组件完成后清理元数据；SQL 由 KnowledgeService 清理。
+        files = self._metadata.get("files", [])
         self._metadata["files"] = [f for f in files if f.get("file_id") != file_id]
         try:
             self.save_metadata()

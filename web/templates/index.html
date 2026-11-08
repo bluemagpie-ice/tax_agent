@@ -450,7 +450,7 @@
                         <button class="send-btn" id="send-btn" onclick="sendMessage()">➤</button>
                     </div>
                     <div class="source-filter">
-                        <label><input type="checkbox" id="chk-web" onchange="updateSourceTypes()"> 联网检索最新政策</label>
+                        <label><input type="checkbox" id="chk-web"> 联网检索最新政策</label>
                         <label>上传范围 <select id="upload-scope"><option value="session">仅当前对话</option><option value="global">我的所有对话</option></select></label>
                     </div>
                     <div class="composer-hint">内容由 AI 生成，仅供参考，请以当地税务机关为准</div>
@@ -519,7 +519,7 @@
 
         let currentSessionId = '';
         const conversationStorageKey = () => 'tax_agent_session_id_' + TaxAuth.user().role;
-        let selectedSourceTypes = ['default', 'user_upload'];
+        const selectedSourceTypes = ['default', 'user_upload'];
         let abortController = null;
         let autoScroll = true;
         let streaming = false;
@@ -896,13 +896,6 @@
             }
         });
 
-        // ---------- 联网检索 ----------
-        function updateSourceTypes() {
-            const webChecked = document.getElementById('chk-web')?.checked || false;
-            selectedSourceTypes = ['default', 'user_upload'];
-            if (webChecked) selectedSourceTypes.push('web_search');
-        }
-
         // ---------- 发送 ----------
         async function sendMessage() {
             if (streaming) { abortController && abortController.abort(); return; }
@@ -959,6 +952,7 @@
                 const reader = resp.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = '';
+                let completed = false;
 
                 while (true) {
                     const { done, value } = await reader.read();
@@ -992,13 +986,15 @@
                         } else if (type === 'error') {
                             let error = dataStr;
                             try { const payload = JSON.parse(dataStr); error = payload.msg || payload; } catch (e) {}
-                            answerText += '\n\n⚠️ ' + error;
+                            throw new Error(error);
                         } else if (type === 'done') {
                             const turn = JSON.parse(dataStr);
+                            completed = true;
                             if (turn && Number.isInteger(turn.revision) && auth === TaxAuth.snapshot()) retractions.set(sid, turn);
                         }
                     }
                 }
+                if (!completed) throw new Error('连接在回复完成前中断，请重试');
 
                 assistantMsg.bubble.classList.remove('typing-cursor');
                 assistantMsg.bubble.innerHTML = renderMarkdown(answerText) || '（未返回内容）';

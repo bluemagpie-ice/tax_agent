@@ -77,7 +77,12 @@
         <div class="card">
             <h2>已上传文件</h2>
             <label>查看 <select id="view-scope" onchange="loadFileList()"><option value="all">我的全部文档</option><option value="global">全局文档</option><option value="session">指定对话文档</option></select></label>
-            <label id="admin-documents" hidden><input type="checkbox" id="include-system" onchange="loadFileList()"> 管理员资料与历史隔离文档 <button type="button" onclick="loadFileList(true)">同步云端清单</button></label>
+            <div id="admin-documents" hidden>
+                <label><input type="checkbox" id="include-system" onchange="loadFileList()"> 管理员资料与历史隔离文档</label>
+                <button type="button" onclick="loadFileList(true)">同步云端清单</button>
+                <button type="button" class="delete-btn" onclick="previewPolicyReset(this)">预览系统政策库重置</button>
+                <button type="button" id="policy-resume" onclick="resumePolicyUpdates(this)" hidden>恢复政策自动更新</button>
+            </div>
             <p id="file-message" role="status" style="margin-top:12px;color:#606266"></p>
             <div class="file-list" id="file-list">
                 <div class="empty-state">暂无文件，上传后将显示在这里</div>
@@ -88,6 +93,18 @@
         <button onclick="document.getElementById('document-preview').close()" style="float:right">关闭</button>
         <h3 id="preview-title"></h3><p id="preview-hint"></p>
         <pre id="preview-content" style="white-space:pre-wrap;overflow:auto;max-height:65vh;margin-top:16px"></pre>
+    </dialog>
+    <dialog id="file-deletion" aria-labelledby="deletion-title" aria-describedby="deletion-impact"
+            style="width:min(90vw,620px);margin:auto;padding:24px;border:1px solid #ddd;border-radius:12px">
+        <h3 id="deletion-title"></h3>
+        <p id="deletion-impact"></p>
+        <ul id="deletion-files" style="max-height:35vh;overflow:auto"></ul>
+        <label id="deletion-confirmation" hidden>输入「重置系统政策库」确认
+            <input id="deletion-phrase" autocomplete="off">
+        </label>
+        <p id="deletion-error" role="alert"></p>
+        <button type="button" id="deletion-cancel" autofocus>取消</button>
+        <button type="button" id="deletion-submit" class="delete-btn"></button>
     </dialog>
     <script src="/static/auth.js"></script>
     <script>
@@ -111,6 +128,7 @@
                 const session = document.getElementById('document-session').value;
                 data.files.filter(f => filter === 'all' || (f.scope === filter && (filter !== 'session' || f.session_id === session))).forEach(f => {
                     addFileItem(f.file_id, f.file_name, f.status === 'active' ? 'success' : 'error', true,
+                        f.can_delete,
                         (f.scope === 'global' ? '全局' : f.scope === 'session' ? '仅此对话' : f.scope === 'system' ? '管理员资料' : '历史隔离') + (f.status === 'active' ? '' : ' / ' + f.status));
                 });
                 document.getElementById('file-message').textContent = refreshCloud ? '云端清单已同步；删除会同时清理文本块和向量。' : '';
@@ -119,31 +137,92 @@
             }
         }
 
-        async function deleteFile(fileId, btn) {
-            if (!confirm('确定要删除该文件吗？此操作将同时清除向量库中的内容和磁盘文件。')) return;
-            btn.textContent = '删除中...';
-            btn.disabled = true;
-            try {
-                const resp = await TaxAuth.request('/api/knowledge/files/' + fileId, {
-                    method: 'DELETE',
-                });
-                if (resp.ok) {
-                    const item = document.getElementById('file-' + fileId);
-                    if (item) item.remove();
-                    if (fileList.children.length === 0) {
-                        fileList.innerHTML = '<div class="empty-state">暂无文件，上传后将显示在这里</div>';
-                    }
-                } else {
-                    const err = await resp.json();
-                    alert('删除失败: ' + (err.detail || '未知错误'));
-                    btn.textContent = '删除';
-                    btn.disabled = false;
+        const fileMessage = document.getElementById('file-message');
+        const deletionDialog = document.getElementById('file-deletion');
+        const deletionSubmit = document.getElementById('deletion-submit');
+        const deletionCancel = document.getElementById('deletion-cancel');
+        const deletionPhrase = document.getElementById('deletion-phrase');
+        let deleting = false;
+        deletionDialog.oncancel = event => { if (deleting) event.preventDefault(); };
+        deletionCancel.onclick = () => deletionDialog.close();
+
+        async function documentRequest(path, method, body) {
+            const response = await TaxAuth.request(path, {method, headers:{'Content-Type':'application/json'},
+                body:body === undefined ? undefined : JSON.stringify(body)});
+            const data = await response.json();
+            if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '操作失败，请刷新后重试');
+            return data;
+        }
+
+        function confirmDeletion({title, impact, files = [], phrase = '', label, execute}) {
+            document.getElementById('deletion-title').textContent = title;
+            document.getElementById('deletion-impact').textContent = impact;
+            const rows = document.getElementById('deletion-files');
+            rows.replaceChildren(...files.map(file => {
+                const row = document.createElement('li');
+                row.textContent = file.file_name + ' · ' + file.cloud_chunks + ' 个云端分块';
+                return row;
+            }));
+            rows.hidden = !files.length;
+            const error = document.getElementById('deletion-error');
+            error.textContent = '';
+            document.getElementById('deletion-confirmation').hidden = !phrase;
+            deletionPhrase.value = '';
+            deletionSubmit.textContent = label;
+            deletionPhrase.oninput = () => { deletionSubmit.disabled = deleting || deletionPhrase.value !== phrase; };
+            deletionPhrase.oninput();
+            deletionSubmit.onclick = async () => {
+                deleting = true;
+                deletionSubmit.disabled = deletionCancel.disabled = deletionPhrase.disabled = true;
+                error.textContent = '';
+                try {
+                    const message = await execute(deletionPhrase.value);
+                    deletionDialog.close();
+                    await loadFileList();
+                    fileMessage.textContent = message;
+                } catch (err) { error.textContent = err.message; }
+                finally {
+                    deleting = false;
+                    deletionCancel.disabled = deletionPhrase.disabled = false;
+                    deletionPhrase.oninput();
                 }
-            } catch (err) {
-                alert('删除失败: ' + err.message);
-                btn.textContent = '删除';
-                btn.disabled = false;
-            }
+            };
+            deletionDialog.showModal();
+            deletionCancel.focus();
+        }
+
+        function deleteFile(fileId, name) {
+            confirmDeletion({title:'删除文件', impact:`将清理「${name}」的入库内容和受管文件。`,
+                label:'确认删除文件', execute:async () => {
+                    await documentRequest('/api/knowledge/files/' + encodeURIComponent(fileId), 'DELETE');
+                    return '文件已删除';
+                }});
+        }
+
+        async function previewPolicyReset(button) {
+            button.disabled = true;
+            try {
+                const data = await documentRequest('/api/policy/library/reset-preview', 'POST');
+                confirmDeletion({title:'重置系统政策库',
+                    impact:`将清理 ${data.files.length} 份系统政策，停用 ${data.disabled_presets.length} 份预置资料的自动入库，并暂停政策更新。`,
+                    files:data.files, phrase:'重置系统政策库', label:'确认重置系统政策库', execute:async confirmation => {
+                        const result = await documentRequest('/api/policy/library/reset', 'POST', {preview_token:data.preview_token, confirmation});
+                        document.getElementById('policy-resume').hidden = false;
+                        return result.success ? `已清理 ${result.deleted.length} 份政策，政策更新已暂停`
+                            : `已清理 ${result.deleted.length} 份政策。以下文件仍需重新预览后重试：${result.failed.join('、')}`;
+                    }});
+            } catch (err) { fileMessage.textContent = err.message; }
+            finally { button.disabled = false; }
+        }
+
+        async function resumePolicyUpdates(button) {
+            button.disabled = true;
+            try {
+                await documentRequest('/api/policy/library/resume-updates', 'POST');
+                button.hidden = true;
+                fileMessage.textContent = '已恢复政策自动更新';
+            } catch (err) { fileMessage.textContent = err.message; }
+            finally { button.disabled = false; }
         }
 
         async function handleFiles(files) {
@@ -174,7 +253,7 @@
                     const data = await resp.json();
                     if (data.status === 'success') {
                         document.getElementById('file-' + tempId)?.remove();
-                        addFileItem(data.file_id, file.name, 'success', true);
+                        addFileItem(data.file_id, file.name, 'success', true, true);
                     } else {
                         updateFileItem(tempId, 'error', data.detail || data.message);
                     }
@@ -186,7 +265,7 @@
             loadFileList();
         }
 
-        function addFileItem(id, name, status, showDelete, scopeText = '') {
+        function addFileItem(id, name, status, showActions, canDelete = false, scopeText = '') {
             const empty = fileList.querySelector('.empty-state');
             if (empty) empty.remove();
             const div = document.createElement('div');
@@ -197,9 +276,11 @@
             const actions = document.createElement('span');
             const label = document.createElement('span'); label.className = 'file-status status-' + status; label.textContent = scopeText || statusText;
             actions.appendChild(label);
-            if (showDelete) {
+            if (showActions) {
                 const view = document.createElement('button'); view.textContent = '浏览'; view.onclick = () => previewFile(id); actions.appendChild(view);
-                const remove = document.createElement('button'); remove.className = 'delete-btn'; remove.textContent = '删除'; remove.onclick = () => deleteFile(id, remove); actions.appendChild(remove);
+                if (canDelete) {
+                    const remove = document.createElement('button'); remove.className = 'delete-btn'; remove.textContent = '删除'; remove.onclick = () => deleteFile(id, name); actions.appendChild(remove);
+                }
             }
             div.append(title, actions);
             fileList.appendChild(div);
@@ -221,6 +302,7 @@
         const documentContent = document.getElementById('document-content');
         function showDocumentAuthError(message) {
             document.getElementById('document-preview').close();
+            deletionDialog.close();
             documentContent.hidden = true;
             const link = document.createElement('a');
             link.href = '/'; link.textContent = '返回首页登录';
@@ -240,6 +322,9 @@
                     document.getElementById('admin-documents').hidden = false;
                     document.getElementById('upload-scope').add(new Option('管理员系统资料', 'system'));
                     document.getElementById('include-system').checked = true;
+                    documentRequest('/api/policy/status', 'GET').then(data => {
+                        document.getElementById('policy-resume').hidden = !data.updates_paused;
+                    }).catch(() => {});
                 }
                 const listResponse = await TaxAuth.request('/api/conversations');
                 const data = await listResponse.json();

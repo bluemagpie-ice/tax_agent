@@ -50,6 +50,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
+import asyncio
 import os
 import inspect
 import re
@@ -57,8 +58,8 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List
-from contextlib import asynccontextmanager, nullcontext
+from typing import Optional, List, Literal
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 
 from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, status, Header
 from fastapi.exceptions import RequestValidationError
@@ -299,6 +300,16 @@ class KnowledgeService:
         from knowledge.kb import QdrantKnowledgeBase
         self._kb = QdrantKnowledgeBase(work_dir=PATHS["data"])
         self._kb.upload_root = Path(self.upload_dir)
+        self._policy_previews = {}
+        self._deleting_files = set()
+
+    def _policy_kb(self):
+        from knowledge.kb import QdrantKnowledgeBase
+        work_dir = policy_updater.kb_work_dir if policy_updater else str(Path(PATHS["data"]) / "kb")
+        kb_id = policy_updater.kb_id if policy_updater else "tax_policy"
+        kb = QdrantKnowledgeBase(work_dir=work_dir, kb_id=kb_id)
+        kb.upload_root = self._kb.upload_root
+        return kb
 
     async def ingest_file(self, file: UploadFile, source_type: str = "user_upload", **metadata) -> dict:
         """
@@ -381,35 +392,47 @@ class KnowledgeService:
 
     async def list_files(self) -> list[dict]:
         """列出所有已上传文件（从持久化元数据读取，刷新不丢失）"""
-        return await self._kb.list_files()
+        policy = await self._policy_kb().list_files()
+        return list({f["file_id"]: f for f in [*await self._kb.list_files(), *policy]}.values())
 
-    async def refresh_cloud_files(self):
-        """管理员显式同步云端清单，包括只有云端分块的历史资料。"""
+    async def _cloud_files(self, *, system_only=False):
         import asyncio
+        from knowledge.kb import is_system_policy
+
         def discover():
-            embedding = self._kb._ensure_embedding()
-            if embedding.qdrant is None:
+            from knowledge.embedding import QdrantService
+            embedding = self._kb._embedding_service
+            qdrant = embedding.qdrant if embedding else QdrantService(read_only=True)
+            if qdrant is None:
                 raise RuntimeError("请先配置 Qdrant Cloud 地址、密钥和 Embedding")
-            client = embedding.qdrant.client
+            client = qdrant.client
+            if not client.collection_exists(qdrant.COLLECTION_NAME):
+                return {}
             offset, grouped = None, {}
             while True:
-                points, offset = client.scroll(collection_name=embedding.qdrant.COLLECTION_NAME,
+                points, offset = client.scroll(collection_name=qdrant.COLLECTION_NAME,
                     limit=256, offset=offset, with_vectors=False,
                     with_payload=["file_id", "file_name", "title", "source_type", "owner_id", "scope", "session_id", "status"])
                 for point in points:
                     payload = point.payload or {}
                     fid = payload.get("file_id")
-                    if not fid:
+                    if not fid or (system_only and not is_system_policy(payload)):
                         continue
                     record = grouped.setdefault(fid, {"file_id": fid, "file_name": payload.get("file_name") or payload.get("title") or fid,
                         "file_path": "", "chunk_count": 0, "cloud_only": True, "tax_metadata": payload})
                     record["chunk_count"] += 1
                 if offset is None:
                     return grouped
-        grouped = await asyncio.to_thread(discover)
+        return await asyncio.to_thread(discover)
+
+    async def refresh_cloud_files(self):
+        """管理员显式同步云端清单，包括只有云端分块的历史资料。"""
+        grouped = await self._cloud_files()
         existing = {f["file_id"]: f for f in self._kb._metadata.get("files", [])}
+        policy_ids = {f["file_id"] for f in await self._policy_kb().list_files()}
         for fid, record in grouped.items():
-            existing.setdefault(fid, record)
+            if fid not in policy_ids:
+                existing.setdefault(fid, record)
         self._kb._metadata["files"] = list(existing.values())
         self._kb.save_metadata()
         return len(grouped)
@@ -426,6 +449,29 @@ class KnowledgeService:
                 limit=256, with_vectors=False, with_payload=["content"])
             return [(p.payload or {}).get("content", "") for p in points]
         return await asyncio.to_thread(read)
+
+    async def policy_inventory(self, policy_kb):
+        """清单同时覆盖本地记录、仅存于云端的历史资料和持久化分块。"""
+        from knowledge.kb import is_system_policy
+        from knowledge.embedding import PersistentDocumentStore
+
+        cloud = await self._cloud_files(system_only=True)
+        files = dict(cloud)
+        for chunk in PersistentDocumentStore().get_chunks():
+            if is_system_policy(chunk.metadata):
+                files.setdefault(chunk.file_id, {"file_id": chunk.file_id, "tax_metadata": chunk.metadata})
+        for record in [*await self._kb.list_files(), *await policy_kb.list_files()]:
+            if is_system_policy(record.get("tax_metadata", {})):
+                files[record["file_id"]] = record
+        return files, {fid: record["chunk_count"] for fid, record in cloud.items()}
+
+    async def policy_reset_preview(self, policy_kb):
+        files, counts = await self.policy_inventory(policy_kb)
+        presets = sorted(f"preset_{p.stem}" for p in (BASE_DIR / "knowledge" / "presets").glob("*.md"))
+        impact = {"files": [{**public_file_info(files[fid]), "cloud_chunks": counts.get(fid, 0)}
+                            for fid in sorted(files)], "disabled_presets": presets,
+                  "updates_paused": policy_updater.tracker.is_paused()}
+        return impact, files
 
     async def list_files_from_sql(self) -> list[dict]:
         """从 SQL 业务表读取已上传文件列表（含分块数）"""
@@ -450,16 +496,67 @@ class KnowledgeService:
             logger.warning(f"[list_files_from_sql] 查询失败: {e}")
             return []
 
-    async def delete_file(self, file_id: str) -> dict:
+    async def delete_file(self, file_id: str, *, policy_kb=None, cloud_record=None, require_system=False) -> dict:
         """删除指定文件：元数据 + Qdrant 向量 + 内存 store + SQL 表 + 磁盘原文件"""
-        record = next((f for f in await self._kb.list_files() if f.get("file_id") == file_id), {})
+        if file_id in self._deleting_files:
+            raise RuntimeError("该文件正在删除")
+        self._deleting_files.add(file_id)
+        try:
+            return await self._delete_file(file_id, policy_kb=policy_kb, cloud_record=cloud_record,
+                                           require_system=require_system)
+        finally:
+            self._deleting_files.discard(file_id)
+
+    async def _delete_file(self, file_id, *, policy_kb, cloud_record, require_system):
+        from knowledge.kb import is_system_policy
+        policy_kb = policy_kb or self._policy_kb()
+        policy_files = await policy_kb.list_files()
+        primary_files = await self._kb.list_files()
+        kb = policy_kb
+        record = next((f for f in policy_files if f.get("file_id") == file_id), None)
+        if record is None:
+            kb = self._kb
+            record = next((f for f in primary_files if f.get("file_id") == file_id), None)
+        if record is None and cloud_record is not None:
+            kb = policy_kb
+            policy_kb._metadata.setdefault("files", []).append(cloud_record)
+            record = cloud_record
+        if record is None:
+            return {"status": "error", "message": "文件不存在", "file_id": file_id}
+        system_policy = is_system_policy(record.get("tax_metadata", {}))
+        if require_system and not system_policy:
+            raise RuntimeError("文件归属已变化，已停止删除")
+        aliases = [f for f in [*primary_files, *policy_files] if f["file_id"] == file_id and f is not record]
+        if aliases and (not system_policy or any(not is_system_policy(f.get("tax_metadata", {})) for f in aliases)):
+            raise RuntimeError("文件 ID 在不同清单中归属冲突，已停止删除")
+        path = record.get("file_path")
+        local_path = kb.local_file_path(record)
+        shared_path = path and any(
+            f.get("file_path") == path
+            or (local_path is not None and (other_path := kb.local_file_path(f)) is not None
+                and other_path.resolve() == local_path.resolve())
+            for f in [*primary_files, *policy_files] if f["file_id"] != file_id
+        )
+        policy_paths = ((Path(PATHS["data"]) / "policies").resolve(), (Path(policy_kb.work_dir) / "_temp_policy").resolve())
+        source = policy_updater.tracker.source_path_for_file(file_id) if system_policy and policy_updater else None
+        # 使用当前配置的客户端，自动更新器的清单不另建客户端。
+        if kb is policy_kb:
+            kb._embedding_service = await asyncio.to_thread(self._kb._ensure_embedding)
+
         # 同步清理 SQL 业务表
         def finalize_sql():
+            if source:
+                source_path = Path(source).resolve()
+                if source_path.is_relative_to(policy_paths[0]) and not any(
+                    f.get("file_path") and Path(f["file_path"]).resolve() == source_path
+                    for f in [*primary_files, *policy_files] if f["file_id"] != file_id
+                ):
+                    source_path.unlink(missing_ok=True)
             from database.repositories import KnowledgeFileRepository
             repo = KnowledgeFileRepository()
             sql_deleted = repo.delete_by_business_id(file_id)
             # 历史 SQL 行尚无业务 ID，仅按已授权清单中的精确原路径清理关联记录。
-            if record.get("file_path"):
+            if path and not shared_path:
                 from database.models import KnowledgeFiles, KnowledgeChunks
                 from database.repositories import SessionLocal
                 with SessionLocal() as session:
@@ -471,7 +568,24 @@ class KnowledgeService:
                     session.commit()
             if sql_deleted:
                 logger.info(f"[delete_file] SQL 记录已清理: file_id={file_id}")
-        ok = await self._kb.delete_file(file_id, finalize=finalize_sql)
+            if system_policy and policy_updater:
+                policy_updater.tracker.suppress_file(file_id)
+
+        async def finalize_deletion():
+            await asyncio.to_thread(finalize_sql)
+            if aliases:
+                other_kb = self._kb if kb is policy_kb else policy_kb
+                original = other_kb._metadata.get("files", [])
+                other_kb._metadata["files"] = [f for f in original if f["file_id"] != file_id]
+                try:
+                    other_kb.save_metadata()
+                except Exception:
+                    other_kb._metadata["files"] = original
+                    raise
+
+        ok = await kb.delete_file(file_id, finalize=finalize_deletion, system_policy=system_policy,
+                                  policy_paths=policy_paths if system_policy and not shared_path else (),
+                                  preserve_path=bool(shared_path))
 
         if ok:
             return {"status": "success", "message": f"文件 {file_id} 已删除", "file_id": file_id}
@@ -545,7 +659,7 @@ class TaxQueryRequest(BaseModel):
     query: str = Field(..., example="餐饮发票能开专票抵扣吗？",description="税务查询语句")
     session_id: Optional[str] = Field(None, description="会话ID")
     source_types: Optional[List[str]] = Field(None, description="知识来源筛选：default / user_upload / web_search；None 表示不限定")
-    web_search: bool = Field(False, description="本轮主动联网检索；检索摘要直接注入，不依赖向量入库")
+    web_search: bool = Field(False, description="本轮主动搜索官方政策并读取正文，不依赖向量入库")
     uploaded_file_ids: Optional[List[str]] = Field(None, max_length=10, description="本轮对话中用户上传的文件ID列表")
     resume: WorkflowResume | None = None
 
@@ -703,6 +817,9 @@ async def tax_chat(body: TaxQueryRequest, current_user: CurrentUser = Depends(ge
         )
 
     except Exception as e:
+        from agents.streaming import ContextBudgetError
+        if isinstance(e, ContextBudgetError):
+            raise HTTPException(422, str(e)) from e
         logger.warning("[同步请求错误] %s", type(e).__name__)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -767,7 +884,7 @@ async def tax_chat_stream(
             task = None
             try:
                 yield f"event: status\ndata: {json.dumps({'text': ' 正在分析问题并检索相关知识…'}, ensure_ascii=False)}\n\n"
-                from agents.streaming import response_events, _sse_line
+                from agents.streaming import ContextBudgetError, response_events, _sse_line
                 queue = asyncio.Queue()
                 loop = asyncio.get_running_loop()
                 token_count = 0
@@ -822,9 +939,13 @@ async def tax_chat_stream(
                 raise
             except Exception as e:
                 logger.warning("[流式] 查询失败（%s）", type(e).__name__)
-                message = ("模型不存在或当前 API Key 无权使用；请在设置中重新获取列表，并选择可用的对话模型"
-                           if getattr(e, "status_code", None) == 404 else "查询失败，请检查模型配置或网络连接后重试")
-                yield f"event: error\ndata: {json.dumps({'msg': message}, ensure_ascii=False)}\n\n"
+                code = "query_failed"
+                message = "查询执行失败，请重试。若问题持续，请查看服务端日志。"
+                if isinstance(e, ContextBudgetError):
+                    code, message = "context_budget", str(e)
+                elif getattr(e, "status_code", None) == 404:
+                    code, message = "model_unavailable", "模型不存在或当前 API Key 无权使用，请在设置中选择可用模型。"
+                yield _sse_line("error", {"code": code, "msg": message})
             finally:
                 stream_open = False
                 if task is not None and not task.done():
@@ -1021,8 +1142,9 @@ async def upload_knowledge(
                 raise HTTPException(status_code=400, detail="请先创建或选择本人对话，再上传单次对话文档")
         source_type = "default" if scope == "system" else "user_upload"
         logger.info(f"[上传] 用户={current_user.user_name}, role={current_user.role}, source_type={source_type}")
-        result = await knowledge_service.ingest_file(file, source_type=source_type,
-                    owner_id=current_user.id, scope=scope, session_id=session_id if scope == "session" else "")
+        with policy_library_guard() if scope == "system" else nullcontext():
+            result = await knowledge_service.ingest_file(file, source_type=source_type,
+                        owner_id=current_user.id, scope=scope, session_id=session_id if scope == "session" else "")
         if result.get("status") != "success":
             raise HTTPException(status_code=502, detail=result.get("message", "文件入库未完成，请在文档页检查"))
         return result
@@ -1042,9 +1164,11 @@ async def list_knowledge_files(include_system: bool = False, refresh_cloud: bool
         if (include_system or refresh_cloud) and current_user.role != "admin":
             raise HTTPException(status_code=403, detail="仅管理员可查看系统和历史隔离资料")
         if refresh_cloud:
-            await knowledge_service.refresh_cloud_files()
+            with policy_library_guard():
+                await knowledge_service.refresh_cloud_files()
         files = await knowledge_service.list_files()
-        files = [public_file_info(f) for f in files if can_manage_file(f, current_user, include_system)]
+        files = [{**public_file_info(f), "can_delete": can_delete_file(f, current_user)}
+                 for f in files if can_manage_file(f, current_user, include_system)]
         return {"success": True, "files": files, "total": len(files)}
     except HTTPException:
         raise
@@ -1069,25 +1193,35 @@ async def delete_knowledge_file(file_id: str, current_user: CurrentUser = Depend
     """【删除文件】全链路清理：元数据 + Qdrant 向量 + 磁盘原文件"""
     try:
         record = await authorized_file(file_id, current_user, admin=True)
+        if not can_delete_file(record, current_user):
+            raise HTTPException(404, "文档不存在或不属于当前用户")
         metadata = record.get("tax_metadata", {})
-        if conversation_memory is not None and metadata.get("owner_id"):
-            from services.security import tenant_scope
-            with tenant_scope(metadata["owner_id"]):
-                sessions = ([{"session_id": metadata.get("session_id")}]
-                            if metadata.get("scope") == "session" else conversation_memory.list_sessions(limit=1000))
-                for session in sessions:
-                    sid = session.get("session_id")
-                    if sid:
-                        conversation_memory.invalidate_document_context(sid)
-                        await clear_conversation_checkpoints(sid)
-        result = await knowledge_service.delete_file(file_id)
+        from knowledge.kb import is_system_policy
+        if is_system_policy(metadata):
+            with policy_library_guard():
+                result = await knowledge_service.delete_file(file_id, require_system=True)
+        else:
+            result = await delete_owned_document(file_id, metadata)
         if result.get("status") == "error":
             raise HTTPException(status_code=503, detail="文件清理未完成，请保留记录并重试")
         return result
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="文件清理失败，请稍后重试")
+    except Exception as exc:
+        logger.warning("[delete_file] 清理未完成（%s）", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="文件清理失败，请稍后重试") from exc
+
+
+async def delete_owned_document(file_id, metadata):
+    if conversation_memory is not None:
+        sessions = ([{"session_id": metadata.get("session_id")}]
+                    if metadata.get("scope") == "session" else conversation_memory.list_sessions(limit=1000))
+        for session in sessions:
+            sid = session.get("session_id")
+            if sid:
+                conversation_memory.invalidate_document_context(sid)
+                await clear_conversation_checkpoints(sid)
+    return await knowledge_service.delete_file(file_id)
 
 
 def can_manage_file(record, user, include_system=False):
@@ -1098,6 +1232,14 @@ def can_manage_file(record, user, include_system=False):
         return True
     return (metadata.get("owner_id") == user.id and metadata.get("scope") in ("global", "session")
             and metadata.get("source_type") != "default")
+
+
+def can_delete_file(record, user):
+    from knowledge.kb import is_system_policy
+    metadata = record.get("tax_metadata", {})
+    if is_system_policy(metadata):
+        return user.role == "admin"
+    return metadata.get("owner_id") == user.id and metadata.get("scope") in ("global", "session")
 
 
 def public_file_info(record):
@@ -1417,6 +1559,79 @@ class PolicyScheduleRequest(BaseModel):
     interval_hours: int = Field(default=6, ge=1, le=168)
 
 
+@contextmanager
+def policy_library_guard():
+    lock = policy_updater._run_lock if policy_updater else None
+    if lock is not None and not lock.acquire(blocking=False):
+        raise HTTPException(409, "政策更新或清理正在执行，请稍后重试")
+    try:
+        yield
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+class ConfirmPolicyReset(BaseModel):
+    preview_token: str = Field(min_length=1, max_length=80)
+    confirmation: Literal["重置系统政策库"]
+
+
+@app.post("/api/policy/library/reset-preview")
+async def preview_policy_reset(current_user: CurrentUser = Depends(require_admin)):
+    if not knowledge_service or not policy_updater:
+        raise HTTPException(503, "政策库未初始化")
+    with policy_library_guard():
+        try:
+            impact, _ = await knowledge_service.policy_reset_preview(knowledge_service._policy_kb())
+        except Exception as exc:
+            raise HTTPException(503, "无法读取完整政策清单，请检查云端连接后重试") from exc
+        token = uuid.uuid4().hex
+        knowledge_service._policy_previews[current_user.id] = (token, time.monotonic() + 300, impact)
+        return {"preview_token": token, **impact}
+
+
+@app.post("/api/policy/library/reset")
+async def reset_policy_library(body: ConfirmPolicyReset, current_user: CurrentUser = Depends(require_admin)):
+    if not knowledge_service or not policy_updater:
+        raise HTTPException(503, "政策库未初始化")
+    with policy_library_guard():
+        preview = knowledge_service._policy_previews.get(current_user.id)
+        if not preview or preview[0] != body.preview_token or time.monotonic() >= preview[1]:
+            raise HTTPException(409, "预览无效或已过期，请重新预览")
+        kb = knowledge_service._policy_kb()
+        try:
+            impact, files = await knowledge_service.policy_reset_preview(kb)
+        except Exception as exc:
+            raise HTTPException(503, "无法核对当前政策清单，请重新预览") from exc
+        knowledge_service._policy_previews.pop(current_user.id)
+        if impact != preview[2]:
+            raise HTTPException(409, "政策库已变化，请重新预览并确认")
+
+        policy_updater.tracker.set_paused(True)
+        metadata = knowledge_service._kb._metadata
+        disabled = set(metadata.get("disabled_presets", []))
+        metadata["disabled_presets"] = sorted(disabled.union(impact["disabled_presets"]))
+        knowledge_service._kb.save_metadata()
+        deleted, failed = [], []
+        for file_id, record in files.items():
+            try:
+                result = await knowledge_service.delete_file(file_id, policy_kb=kb, cloud_record=record, require_system=True)
+                (deleted if result["status"] == "success" else failed).append(file_id)
+            except Exception as exc:
+                logger.warning("[policy_reset] 文件 %s 清理未完成（%s）", file_id, type(exc).__name__)
+                failed.append(file_id)
+        return {"success": not failed, "deleted": deleted, "failed": failed, "updates_paused": True}
+
+
+@app.post("/api/policy/library/resume-updates")
+def resume_policy_updates(current_user: CurrentUser = Depends(require_admin)):
+    if not policy_updater:
+        raise HTTPException(503, "政策更新器未初始化")
+    with policy_library_guard():
+        policy_updater.tracker.set_paused(False)
+    return {"success": True}
+
+
 @app.put("/api/policy/schedule")
 def set_policy_schedule(body: PolicyScheduleRequest, current_user: CurrentUser = Depends(require_admin)):
     if not policy_updater:
@@ -1431,11 +1646,15 @@ def trigger_policy_update(current_user: CurrentUser = Depends(require_admin)):
     if not policy_updater:
         raise HTTPException(status_code=503, detail="政策更新器未初始化")
     try:
+        if policy_updater.tracker.is_paused():
+            raise HTTPException(409, "系统政策更新已暂停，请在文档管理中恢复后再执行")
         report = policy_updater.run_once()
         return {
-            "success": True,
+            "success": not report.errors and not report.failed,
             "report": report.to_dict(),
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[政策更新] 手动触发失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="操作失败，请稍后重试；详细原因已记录于服务端")
@@ -1451,6 +1670,7 @@ def get_policy_status(current_user: CurrentUser = Depends(require_admin)):
     return {
         "success": True,
         "scheduler": status,
+        "updates_paused": policy_updater.tracker.is_paused(),
         "latest_report": latest,
     }
 
@@ -2006,7 +2226,9 @@ async def delete_web_search_results(file_id: str | None = None, current_user: Cu
             await delete_knowledge_file(record["file_id"], current_user)
         if file_id and managed:
             return {"success": True, "deleted_files": len(managed)}
-        result = do_delete(file_id=file_id)
+        result = await asyncio.to_thread(do_delete, file_id=file_id)
+        if result.get("status") == "not_found":
+            raise HTTPException(status_code=404, detail=result["message"])
         if result.get("status") == "error":
             raise HTTPException(status_code=502, detail=result["message"])
         return {"success": True, "deleted_files": len(managed), **result}

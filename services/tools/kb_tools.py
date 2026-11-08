@@ -19,18 +19,14 @@ import ipaddress
 import re
 import xml.etree.ElementTree as ET
 from copy import deepcopy
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urljoin
 from typing import Literal, Optional
 
 import requests
 
 from services.cache_utils import TTLCache
-from services.security import current_tenant_id, document_session
+from services.security import blocked_document_ids, current_tenant_id, document_session
 from services.config_manager import ConfigManager
-
-_search_cache = TTLCache(ttl_seconds=300, maxsize=128)
-
-from services.cache_utils import TTLCache
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +54,7 @@ def search_tax_policy(
              注意：is_current 缺失时保留 None（未知不等于有效，也不等于已废止）
     """
     try:
-        from knowledge.embedding import EmbeddingService, PersistentDocumentStore
+        from knowledge.embedding import EmbeddingService, PersistentDocumentStore, QdrantNotConfigured
 
         # 组装 Qdrant 过滤条件
         filters: dict = {}
@@ -69,11 +65,20 @@ def search_tax_policy(
         cached = _search_cache.get(cache_key)
         if cached is not None:
             logger.info(f"[search_tax_policy] 缓存命中 → {len(cached)} 条")
-            return deepcopy(cached)
+            return deepcopy([item for item in cached if item.get("file_id") not in blocked_document_ids])
 
         store = PersistentDocumentStore()
         options = {"qdrant_read_only": True, "use_bm25": False, "use_neo4j": False} if research else {}
-        svc = EmbeddingService(store=store, use_qdrant=True, skip_rebuild=True, **options)
+        try:
+            svc = EmbeddingService(store=store, use_qdrant=True, skip_rebuild=True, **options)
+        except QdrantNotConfigured:
+            if research and not any(chunk.metadata.get("source_type") == "default" for chunk in store.get_chunks()):
+                return []
+            raise
+        if research and not svc.qdrant.has_policy_chunks():
+            return []
+        if research and not svc.embedding_model:
+            raise RuntimeError("有政策资料，但尚未配置向量模型")
 
         # 加一点检索增强（让 RRF 的 BM25 分支也受益）
         enhanced = query if research else f"税法 政策 条文 {query}"
@@ -175,41 +180,27 @@ _SEARCH_HEADERS = {
 
 
 def _bing_search(query: str, limit: int = 5) -> list[dict]:
-    """用 Bing 搜索并解析结果，返回 [{title, url, snippet}]。
-
-    超时策略：连接 5s，读取 8s；读取超时不是整次请求的总时间上限。
-    失败时返回空列表，不影响主流程。
-    """
+    """解析 Bing HTML，将无法识别的响应与明确的零结果区分。"""
     from bs4 import BeautifulSoup
 
     search_url = os.getenv("WEB_SEARCH_URL") or "https://cn.bing.com/search"
-    try:
-        resp = requests.get(
-            search_url,
-            params={"q": query, "count": limit},
-            headers=_SEARCH_HEADERS,
-            timeout=(5, 8),
-        )
-        resp.raise_for_status()
-    except requests.exceptions.Timeout:
-        logger.warning(f"[Bing] 搜索超时: {search_url}")
-        return []
-    except requests.exceptions.ConnectionError:
-        logger.warning(f"[Bing] 无法连接搜索服务，请检查网络")
-        return []
-    except requests.exceptions.RequestException as e:
-        logger.warning(f"[Bing] 搜索请求失败: {e}")
-        return []
+    resp = requests.get(search_url, params={"q": query, "count": limit},
+                        headers=_SEARCH_HEADERS, timeout=(3, 6))
+    resp.raise_for_status()
 
     resp.encoding = "utf-8"
     soup = BeautifulSoup(resp.text, "html.parser")
 
     results = []
-    for li in soup.select("li.b_algo"):
+    entries = soup.select("li.b_algo")
+    for li in entries:
         a = li.select_one("h2 a")
         if not a:
             continue
-        href = a.get("href", "")
+        raw_href = a.get("href", "")
+        if not raw_href:
+            continue
+        href = urljoin(search_url, raw_href)
         # Bing 会把真实链接编码在 /ck/a?u=a1... 中，先解码再做官网过滤。
         if urlparse(href).hostname in ("www.bing.com", "cn.bing.com"):
             encoded = parse_qs(urlparse(href).query).get("u", [""])[0]
@@ -229,27 +220,28 @@ def _bing_search(query: str, limit: int = 5) -> list[dict]:
         results.append({"title": title, "url": href, "snippet": snippet})
         if len(results) >= limit:
             break
+    if not results and not soup.select_one("#b_results .b_no, li.b_no"):
+        raise ValueError("Bing HTML 未返回可识别的搜索结果页")
     return results
 
 
 def _bing_rss_search(query: str, limit: int = 5) -> list[dict]:
     """HTML 结果缺失时读取 Bing RSS，保留明确失败日志。"""
-    try:
-        response = requests.get(os.getenv("WEB_SEARCH_URL") or "https://cn.bing.com/search",
-                                params={"q": query, "format": "rss", "count": limit},
-                                headers=_SEARCH_HEADERS, timeout=(3, 6))
-        response.raise_for_status()
-        root = ET.fromstring(response.text)
-        return [{"title": item.findtext("title", ""), "url": item.findtext("link", ""),
-                 "snippet": item.findtext("description", "")}
-                for item in root.findall("./channel/item")
-                if urlparse(item.findtext("link", "")).scheme in ("http", "https")][:limit]
-    except (requests.RequestException, ET.ParseError) as exc:
-        logger.warning("Bing RSS 检索失败（%s）", type(exc).__name__)
-        return []
+    response = requests.get(os.getenv("WEB_SEARCH_URL") or "https://cn.bing.com/search",
+                            params={"q": query, "format": "rss", "count": limit},
+                            headers=_SEARCH_HEADERS, timeout=(3, 6))
+    response.raise_for_status()
+    root = ET.fromstring(response.text)
+    channel = root.find("channel")
+    if root.tag != "rss" or channel is None:
+        raise ValueError("Bing RSS 响应缺少搜索频道")
+    return [{"title": item.findtext("title", ""), "url": item.findtext("link", ""),
+             "snippet": item.findtext("description", "")}
+            for item in channel.findall("item")
+            if urlparse(item.findtext("link", "")).scheme in ("http", "https")][:limit]
 
 
-def read_web_page(url: str, max_chars: int = 10000, *, official_only: bool = False) -> dict:
+def read_web_page(url: str, max_chars: int = 10000, *, official_only: bool = False, require_article: bool = False) -> dict:
     """读取公开网页正文；校验每次跳转、限制大小，失败返回可见的结构化错误。"""
     from bs4 import BeautifulSoup
     from urllib.parse import urljoin
@@ -259,6 +251,8 @@ def read_web_page(url: str, max_chars: int = 10000, *, official_only: bool = Fal
     try:
         for _ in range(4):
             parsed = urlparse(url)
+            if require_article and not _national_policy_site(url):
+                raise ValueError("政策原文读取只接受全国性政策官网及其官方跳转")
             if official_only and not official_url(url):
                 raise ValueError("政策原文读取只接受官方站点及其官方跳转")
             if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
@@ -296,7 +290,14 @@ def read_web_page(url: str, max_chars: int = 10000, *, official_only: bool = Fal
                     title = next((line.strip() for line in text.splitlines() if len(line.strip()) >= 6), "官方政策附件")
                     metadata["truncated"] = len(pdf.pages) > 12
                 else:
-                    soup = BeautifulSoup(bytes(content), "html.parser")
+                    if require_article:
+                        try:
+                            html = content.decode("utf-8-sig")
+                        except UnicodeDecodeError:
+                            html = bytes(content)
+                    else:
+                        html = bytes(content)
+                    soup = BeautifulSoup(html, "html.parser")
                     title = soup.title.get_text(" ", strip=True) if soup.title else parsed.hostname
                     for node in soup(["script", "style", "noscript", "nav", "footer", "header"]):
                         node.decompose()
@@ -307,14 +308,31 @@ def read_web_page(url: str, max_chars: int = 10000, *, official_only: bool = Fal
                         published = soup.select_one("meta[name='PubDate'], meta[property='article:published_time']")
                         if published:
                             metadata["publish_date"] = published.get("content")
+                        if require_article:
+                            document_number = soup.select_one(".actfwzh") or soup.find(
+                                ["h4", "h5"], string=re.compile(r"公告\s*\d{4}\s*年\s*第\s*\d+\s*号"))
+                            if document_number and document_number.get_text(strip=True):
+                                metadata["document_number"] = document_number.get_text(" ", strip=True)
+                            generated = soup.select_one("meta[name='others']")
+                            if (generated and metadata.get("publish_date") and "页面生成时间" in generated.get("content", "")
+                                    and metadata.get("publish_date") in generated["content"]):
+                                metadata.pop("publish_date")
                         for selector, key in ((".dfsj", "response_date"), (".arc_date", "document_date")):
                             label = soup.select_one(selector)
                             if label:
                                 date = re.search(r"\d{4}[-年/]\d{1,2}[-月/]\d{1,2}日?", label.get_text())
                                 if date:
                                     metadata[key] = date.group()
-                    body = (soup.select_one(".TRS_Editor, .contentLeft, #zoom, #artibody, .article-content")
-                            if official_only else None) or soup.select_one("article, main, #content") or soup.body or soup
+                    if require_article:
+                        body = next((node for selector in (
+                            ".arc_cont", ".TRS_Editor", "#fontzoom", "#zoom", "#artibody", ".article-content",
+                            ".xxgk_content", ".Custom_UnionStyle", "article",
+                        ) if (node := soup.select_one(selector)) is not None), None)
+                        if body is None:
+                            raise ValueError("未找到政策正文容器，页面可能是栏目、验证页或动态加载页")
+                    else:
+                        body = (soup.select_one(".TRS_Editor, .contentLeft, #zoom, #artibody, .article-content")
+                                if official_only else None) or soup.select_one("article, main, #content") or soup.body or soup
                     text = body.get_text("\n", strip=True)
                     if official_only:
                         metadata["attachments"] = list(dict.fromkeys(
@@ -326,18 +344,23 @@ def read_web_page(url: str, max_chars: int = 10000, *, official_only: bool = Fal
                     if date and not metadata.get("publish_date"):
                         metadata["publish_date"] = date.group(1)
                     number = re.search(r"(?m)^\s*(?:财政部\s*税务总局|国家税务总局|税务总局)\s*公告\s*\d{4}\s*年\s*第\s*\d+\s*号", text[:1300])
-                    if number:
-                        metadata["document_number"] = number.group().strip()
+                    if number and (require_article or not metadata.get("document_number")):
+                        metadata.setdefault("document_number", number.group().strip())
                         metadata["issuer"] = "财政部、税务总局" if number.group().strip().startswith("财政部") else "国家税务总局"
+                    if require_article:
+                        signed = re.search(r"((?:财政部[\s、]*税务总局|国家税务总局))\s*\n\s*(\d{4}年\s*\d{1,2}月\s*\d{1,2}日)\s*$", text)
+                        if signed:
+                            metadata["issuer"] = re.sub(r"\s+", "、", signed.group(1))
+                            metadata.setdefault("document_date", signed.group(2))
                     effective = re.search(r"(?:本(?:公告|办法|规定|条例)|现予公布[，,]\s*)自\s*(\d{4}年\s*\d{1,2}月\s*\d{1,2}日)起施行", text)
                     if effective:
                         metadata["effective_date"] = re.sub(r"\s+", "", effective.group(1))
-                if not text:
+                if not text or (require_article and (len(text.strip()) < 30 or text.strip() == title)):
                     raise ValueError("网页没有可读取正文，可能需要登录或动态加载")
                 return {**metadata, "status": "success", "url": url, "title": title, "content": text[:max_chars],
                         "truncated": len(text) > max_chars or metadata.get("truncated", False)}
         raise ValueError("网页跳转次数过多")
-    except (requests.RequestException, ValueError, OSError) as exc:
+    except (requests.RequestException, ValueError, OSError, KeyError) as exc:
         logger.warning("网页读取失败（%s）", type(exc).__name__)
         return {"status": "error", "url": url, "content": "", "message": str(exc) if isinstance(exc, ValueError) else "网页读取失败，请检查网络或链接"}
 
@@ -363,16 +386,11 @@ def search_web_policy(
 
     # ---- 源 1：通用网页搜索（Bing，国内可访问）----
     if source in ("duckduckgo", "all"):
-        try:
-            for r in (_bing_search(query, limit=limit) or _bing_rss_search(query, limit=limit)):
-                results.append({
-                    "title": r["title"],
-                    "url": r["url"],
-                    "snippet": r["snippet"],
-                    "source": "bing",
-                })
-        except Exception as e:
-            logger.warning(f"[search_web_policy] Bing 搜索失败: {e}")
+        _, candidates = _try_search([
+            (_bing_search, query, "bing", lambda _: True),
+            (_bing_rss_search, query, "bing", lambda _: True),
+        ], limit)
+        results.extend(candidates)
 
     # ---- 源 2：财政部官网 / 国家税务总局官网（定向）----
     if source in ("gov_cn", "all"):
@@ -392,7 +410,7 @@ def search_web_policy(
     return deduped
 
 
-def search_official_research(query: str, limit: int = 2, *, by_title: bool = False) -> list[dict]:
+def search_official_research(query: str, limit: int = 2, *, by_title: bool = False, policy_only: bool = False) -> list[dict]:
     """Use the public search endpoint used by the STA policy library page."""
     from bs4 import BeautifulSoup
     from services.research_evidence import official_url
@@ -401,6 +419,8 @@ def search_official_research(query: str, limit: int = 2, *, by_title: bool = Fal
               "column": "政策法规,政策解读,政策指引", "pageNum": 0, "pageSize": 5, "participleRule": 0}
     if by_title:
         params.update(column="政策法规", wordPlace=1, type=0)
+    elif policy_only:
+        params.update(column="政策法规", type=0)
     response = requests.get("https://www.chinatax.gov.cn/search5/search/s",
                             headers={**_SEARCH_HEADERS, "Referer": "https://fgk.chinatax.gov.cn/"},
                             params=params, timeout=(3, 6), allow_redirects=False)
@@ -413,44 +433,168 @@ def search_official_research(query: str, limit: int = 2, *, by_title: bool = Fal
         parsed = urlparse(url)
         host = "fgk.chinatax.gov.cn" if parsed.hostname == "www.chinatax.gov.cn" and parsed.path.startswith("/zcfgk/") else parsed.netloc
         url = parsed._replace(scheme="https", netloc=host, fragment="").geturl()
+        if policy_only and (host != "fgk.chinatax.gov.cn" or not re.fullmatch(r"/zcfgk/c\d+/c\d+/content\.html", parsed.path)):
+            continue
         if any(item["url"] == url for item in results):
             continue
         title = BeautifulSoup(row.get("title") or "", "html.parser").get_text()
         results.append({"title": title, "url": url, "source": "sta_policy_search", "rank": len(results) + 1})
+    def title_key(title):
+        return re.sub(r"[\s《》〈〉]", "", title)
     if by_title:
-        def title_key(title):
-            return re.sub(r"[\s《》〈〉]", "", title)
         results = [item for item in results if title_key(query) in title_key(item["title"])]
+    elif policy_only:
+        results.sort(key=lambda item: title_key(query) not in title_key(item["title"]))
     return results[:limit]
 
-def _search_gov_sites(query: str, limit: int = 5) -> list[dict]:
-    """定向搜索财政部 / 国家税务总局官网。"""
-    site_query = f"(site:mof.gov.cn OR site:chinatax.gov.cn) {query}"
-
+def _national_policy_site(url: str) -> bool:
     try:
-        results = []
-        for r in _bing_search(site_query, limit=limit * 2):
-            host = (urlparse(r["url"]).hostname or "").lower()
-            if any(host == domain or host.endswith("." + domain) for domain in ("mof.gov.cn", "chinatax.gov.cn")):
-                results.append({
-                    "title": r["title"],
-                    "url": r["url"],
-                    "snippet": r["snippet"],
-                    "source": "gov_cn",
-                })
-        # 某些 Bing 页面忽略 OR 限定；没有官网结果时再尝试单站点检索。
-        if not results:
-            for domain in ("chinatax.gov.cn", "mof.gov.cn"):
-                for r in _bing_rss_search(f"site:{domain} {query}", limit=10):
-                    host = (urlparse(r["url"]).hostname or "").lower()
-                    if host == domain or host.endswith("." + domain):
-                        results.append({**r, "source": "gov_cn"})
-                if results:
-                    break
-        return results[:limit]
-    except Exception as e:
-        logger.warning(f"[_search_gov_sites] 定向搜索失败: {e}")
-        return []
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        return (parsed.scheme in ("https", "http") and not parsed.username and not parsed.password
+                and parsed.port in (None, 80, 443)
+                and (host in ("gov.cn", "www.gov.cn", "chinatax.gov.cn", "www.chinatax.gov.cn", "fgk.chinatax.gov.cn")
+                     or host == "mof.gov.cn" or host.endswith(".mof.gov.cn")))
+    except ValueError:
+        return False
+
+
+def _try_search(attempts, limit):
+    succeeded = False
+    for provider, query, source, accepts in attempts:
+        try:
+            candidates = provider(query, limit=limit)
+            if not isinstance(candidates, list):
+                raise ValueError("搜索结果格式不正确")
+            results = {}
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    raise ValueError("搜索结果条目格式不正确")
+                url = candidate.get("url", "")
+                if url and accepts(url):
+                    url = urlparse(url)._replace(fragment="").geturl()
+                    results.setdefault(url, {**candidate, "url": url, "source": source})
+            succeeded = True
+            if results:
+                return "success", list(results.values())[:limit]
+        except (OSError, ET.ParseError, ValueError, KeyError, TypeError) as exc:
+            logger.warning("政策搜索服务 %s 失败（%s）", source, type(exc).__name__)
+    return ("no_results" if succeeded else "request_failed"), []
+
+
+def _government_search_attempts(query):
+    return [
+        (_bing_search, f"(site:mof.gov.cn OR site:chinatax.gov.cn) {query}", "gov_cn", _national_policy_site),
+        (_bing_rss_search, f"site:chinatax.gov.cn {query}", "gov_cn", _national_policy_site),
+        (_bing_rss_search, f"site:mof.gov.cn {query}", "gov_cn", _national_policy_site),
+    ]
+
+
+def _search_gov_sites(query: str, limit: int = 5) -> list[dict]:
+    return _try_search(_government_search_attempts(query), limit)[1]
+
+
+def search_live_policy_candidates(query: str, limit: int = 3) -> tuple[str, list[dict]]:
+    """聊天专用，官网法规库查询失败或无结果时使用 Bing 定向检索。"""
+    query = " ".join(query.split())[:500]
+    def search_sta(term, limit):
+        return search_official_research(term, limit=limit, policy_only=True)
+
+    # The official index favors policy subjects over a full conversational question.
+    match = re.match(r"^([\u4e00-\u9fff]{4,24}?)(?:有什么|有哪些|有何|如何享受|能享受什么|适用哪些|适用什么)", query)
+    subject = match.group(1) if match else None
+    def search_subject(term, limit):
+        rows = [row for row in search_sta(term, limit) if term in re.sub(r"\s+", "", row.get("title") or "")]
+        if term == "小型微利企业" and "优惠" in query:
+            # The administering and substantive announcements use different names for this subject.
+            _, related = _try_search([
+                (lambda term, limit: search_official_research(term, limit=limit, by_title=True),
+                 "小微企业和个体工商户发展", "sta_policy_search", _national_policy_site)
+            ], 1)
+            rows = [*related, *rows]
+        return rows[:limit]
+
+    subject_attempt = [(search_subject, subject, "sta_policy_search", _national_policy_site)] if subject else []
+    return _try_search([
+        *subject_attempt,
+        (search_sta, query, "sta_policy_search", _national_policy_site),
+        *_government_search_attempts(query),
+    ], limit)
+
+
+LIVE_POLICY_STATUS = {
+    "disabled": "本轮未开启联网检索。",
+    "success": "已读取本次联网获取的官方政策正文。",
+    "no_results": "搜索已完成，未找到匹配的官方政策。联网检索未成功，本次回答仅参考本地知识库。",
+    "read_failed": "找到了官方页面，但未能读取政策正文。联网检索未成功，本次回答仅参考本地知识库。",
+    "request_failed": "政策搜索服务请求失败。联网检索未成功，本次回答仅参考本地知识库。",
+}
+
+
+async def retrieve_live_policy(query, enabled, emit=None):
+    import asyncio
+
+    def status(text, **fields):
+        if emit:
+            emit("status", {"text": text, **fields})
+
+    outcome, sources = "disabled", []
+    if enabled:
+        urls = re.findall(r'https?://[^\s<>"，。；）)]+', query)
+        if urls:
+            candidates = [{"url": url, "title": "用户提供的官方页面"} for url in dict.fromkeys(
+                urlparse(url)._replace(fragment="").geturl() for url in urls if _national_policy_site(url)
+            )][:3]
+            outcome = "read_failed"
+        else:
+            status("正在搜索官方政策…", web_search_status="searching")
+            outcome, candidates = await asyncio.to_thread(search_live_policy_candidates, query)
+        if candidates:
+            status("正在读取政策正文…", web_search_status="reading")
+            pages = await asyncio.gather(*(asyncio.to_thread(
+                read_web_page, candidate["url"], 3500, official_only=True, require_article=True
+            ) for candidate in candidates))
+            by_url = {}
+            for candidate, page in zip(candidates, pages):
+                url = page.get("url") or candidate["url"]
+                if not _national_policy_site(url):
+                    url = candidate["url"]
+                url = urlparse(url)._replace(fragment="").geturl()
+                host = urlparse(url).hostname
+                title = page.get("title")
+                read_ok = page.get("status") == "success" and bool(page.get("content"))
+                if url in by_url and (by_url[url]["page_status"] == "success" or not read_ok):
+                    continue
+                by_url[url] = {
+                    "title": title if title and title != host else candidate.get("title") or "官方政策",
+                    "url": url,
+                    "website": host,
+                    "page_status": "success" if read_ok else "error",
+                    "publish_date": _published_day(page.get("publish_date")),
+                    "document_date": _published_day(page.get("document_date")),
+                    "document_number": page.get("document_number"),
+                    "issuer": page.get("issuer"),
+                    "effective_date": _published_day(page.get("effective_date")),
+                    "snippet": candidate.get("snippet", ""),
+                    "content": page["content"] if read_ok else "",
+                    "truncated": bool(page.get("truncated")),
+                }
+            sources = list(by_url.values())
+            outcome = "success" if any(source["page_status"] == "success" for source in sources) else "read_failed"
+    status(LIVE_POLICY_STATUS[outcome], web_search_status=outcome)
+    return {"status": outcome, "sources": sources}
+
+
+def _published_day(value):
+    from datetime import date
+
+    match = re.match(r"(\d{4})[-年/](\d{1,2})[-月/](\d{1,2})(?!\d)", str(value or "").strip())
+    if match:
+        try:
+            return date(*map(int, match.groups())).isoformat()
+        except ValueError:
+            pass
+    return None
 
 # ---- LangChain Tool 封装 ----
 

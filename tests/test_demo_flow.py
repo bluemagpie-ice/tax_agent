@@ -96,18 +96,20 @@ def test_web_search_injected_and_memory_keeps_original_query(tmp_path, found):
     agent.record_turn = MagicMock()
     agent.invoke_messages = AsyncMock(return_value={"final_answer": "回答"})
     results = [{"title": "政策标题", "url": "https://www.chinatax.gov.cn/demo", "snippet": "检索依据"}] if found else []
-    with patch("services.tools.kb_tools.search_web_policy", return_value=results) as search, \
+    with patch("services.tools.kb_tools.search_live_policy_candidates", return_value=("success" if found else "no_results", results)) as search, \
          patch("services.tools.kb_tools.read_web_page", return_value={"status": "success", "content": "检索依据", "url": "https://www.chinatax.gov.cn/demo"}):
         answer = asyncio.run(agent.run("什么是进项税", {"thread_id": "demo", "web_search": True}))
-    search.assert_any_call("什么是进项税", source="gov_cn", limit=3)
-    assert search.call_count == (1 if found else 2)
+    search.assert_called_once_with("什么是进项税")
     assert agent.record_turn.call_args.kwargs["user_message"] == "什么是进项税"
     assert agent.record_turn.call_args.kwargs["assistant_message"] == answer
+    invoked = agent.invoke_messages.await_args
+    assert invoked.args[0][0].content == "什么是进项税"
+    assert "历史背景" in invoked.kwargs["input_context"]["memory_context"]
     if found:
-        assert "检索依据" in agent.invoke_messages.await_args.args[0][0].content
+        assert invoked.kwargs["input_context"]["web_policy"]["sources"][0]["content"] == "检索依据"
         assert "https://www.chinatax.gov.cn/demo" in answer
     else:
-        assert "未核验最新政策" in answer
+        assert "联网检索未成功，本次回答仅参考本地知识库。" in answer
 
 
 def test_bing_redirect_decoded_and_fake_gov_host_rejected():

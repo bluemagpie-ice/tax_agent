@@ -3,6 +3,7 @@ from tests.auth_helpers import ADMIN_BEARER
 import threading
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from knowledge.policy_updater import PolicyUpdater, TaxGovCnSource
@@ -88,8 +89,12 @@ def test_mof_parser_uses_article_title_and_removes_style(monkeypatch):
     response.status_code = 200
     response.iter_content.side_effect = lambda size: [response.text.encode("utf-8")]
     response.headers = {"Content-Type":"text/html;charset=utf-8"}
-    response.text = '<meta name="ArticleTitle" content="税务政策标题"><meta name="PubDate" content="2024-01-01"><h3>财政部微信</h3><div class="TRS_Editor"><style>.css{bad}</style><p>有效政策正文</p></div>'
+    body = "自本公告发布之日起，符合公告所列条件的增值税纳税人按规定申报。"
+    response.text = f'<meta name="ArticleTitle" content="关于增值税申报的公告"><meta name="PubDate" content="2024-01-01"><h3>财政部微信</h3><div class="TRS_Editor"><style>.css{{bad}}</style><p>{body}</p></div>'
     monkeypatch.setattr(source._session, "get", lambda *args, **kwargs: response)
     item = source._fetch_policy_page("https://szs.mof.gov.cn/zhengcefabu/202401/t20240101_1.htm")
-    assert item.title == "税务政策标题" and item.content == "有效政策正文"
+    assert item.title == "关于增值税申报的公告" and item.content == body
     assert item.published_date == "2024-01-01"
+    response.text = response.text.replace('name="PubDate"', 'name="OtherDate"')
+    with pytest.raises(ValueError, match="缺少明确的发布日期"):
+        source._fetch_policy_page(item.url)

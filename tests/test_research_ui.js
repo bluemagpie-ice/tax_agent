@@ -26,9 +26,11 @@ const context={document:{getElementById:get,createElement:tag=>new Element(tag),
     Option:function(text,value) {const element=new Element('option');element.textContent=text;element.value=value;return element;},
     window:{addEventListener:(name,fn)=>{listeners[name]=fn;}},AbortController,TextDecoder,
     fetch:async(url,options)=>{
-        const body=options.body ? JSON.parse(options.body):null;calls.push({url,body});
+        const body=options.body ? JSON.parse(options.body):null;calls.push({url,body,method:options.method});
         if(url==='/api/research/tasks' && !body) return response([]);
         if(url==='/api/research/tasks') return response(current);
+        if(url==='/api/research/tasks/test-task' && options.method==='DELETE') return response({status:'deleted'});
+        if(url==='/api/research/tasks/test-task') return response({...current,linked_case_count:caseRecord ? 1 : 0});
         if(url.endsWith('/stream')) {current={...current,status:'awaiting_review',revision:5,report_version:1,evidence:[],report};return response(current,true);}
         if(url.endsWith('/review')) {assert.equal(body.report_version,1);current={...current,status:'finalized',revision:6};return response(current);}
         if(url.includes('/case-preview')) return response({content:{title:'模拟案例',facts:['模拟资料'],conclusion:'待核实',evidence:[]},source_task_id:current.task_id,source_report_version:1,notice:'预览未保存'});
@@ -56,6 +58,12 @@ const findButton=text=>get('research-result').querySelectorAll('button').find(b=
     findButton('确认保存并发布到个人案例库').onclick();await settle();
     assert.equal(caseRecord.status,'published');assert.equal(caseRecord.professional_review.status,'not_reviewed');
     assert.deepEqual(calls.filter(c=>c.url==='/api/research/cases/case').map(c=>c.body.action),['consent','publish']);
+    const disclosure=get('research-result').querySelectorAll('details').find(d=>d.children[0].textContent==='删除研究任务');
+    disclosure.open=true; disclosure.ontoggle(); await settle();
+    assert.match(disclosure.textContent,/关联的 1 个个人案例/);
+    findButton('确认删除研究任务').onclick(); await settle();
+    assert.equal(calls.find(c=>c.method==='DELETE').body.delete_cases,false);
+    assert.match(get('research-status').textContent,/研究任务已删除/);
     listeners['tax-auth-changed']();assert.equal(get('research-result').children.length,0);
     assert.equal(get('research-query').value,'');
     const normalFetch=context.fetch;
@@ -75,5 +83,5 @@ const findButton=text=>get('research-result').querySelectorAll('button').find(b=
     assert.match(get('research-status').textContent,/42 秒/);
     assert.equal(get('research-run').textContent,'从已保存步骤恢复');
     context.fetch=normalFetch;
-    console.log('PASS: Research mode isolation, validation, fragmented SSE, version confirmation, preview-before-save, consent/publication and identity reset (DOM substitutes)');
+    console.log('PASS: Research mode, SSE, case lifecycle, task deletion defaults and identity reset (DOM substitutes)');
 })().catch(error=>{console.error(error);process.exitCode=1;});

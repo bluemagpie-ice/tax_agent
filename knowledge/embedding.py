@@ -38,7 +38,6 @@ try:
     _NEO4J_AVAILABLE = True
 except ImportError:
     _NEO4J_AVAILABLE = False
-    logging.warning("neo4j 未安装，图数据库功能不可用。请执行: pip install neo4j")
 
 try:
     from rank_bm25 import BM25Okapi
@@ -175,6 +174,14 @@ class ChunkDocument:
         self.metadata = metadata or {}
 
 
+class QdrantNotConfigured(ValueError):
+    pass
+
+
+class PolicyOwnershipConflict(RuntimeError):
+    pass
+
+
 class QdrantService:
     """
     Qdrant 向量数据库服务
@@ -196,7 +203,7 @@ class QdrantService:
         self.url = cfg["url"]
 
         if not self.url:
-            raise ValueError("缺少 Qdrant URL，请在模型配置中填写")
+            raise QdrantNotConfigured("缺少 Qdrant URL，请在模型配置中填写")
 
         self.client = client if client is not None else QdrantClient(
             url=self.url,
@@ -343,42 +350,61 @@ class QdrantService:
             for point in results.points
         ]
 
-    def delete_chunks_by_file_id(self, file_id: str) -> int:
-        """
-        按 file_id 删除 Qdrant 中对应的所有向量点
-        :param file_id: 入库时关联的文件 id
-        :return: 删除的点数量
-        """
-        if read_only_retrieval.get():
-            raise PermissionError("评测仅允许只读检索")
+    def has_policy_chunks(self) -> bool:
+        from qdrant_client.http.exceptions import UnexpectedResponse
         from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-        # 先查一下有多少条匹配的（用于日志和返回值）
-        count_result = self.client.count(
-            collection_name=self.COLLECTION_NAME,
-            count_filter=Filter(
-                must=[
-                    FieldCondition(key="file_id", match=MatchValue(value=file_id))
-                ]
-            ),
-        )
-        deleted_count = count_result.count
+        selector = Filter(must=[FieldCondition(key="source_type", match=MatchValue(value="default"))])
+        try:
+            return self.client.count(self.COLLECTION_NAME, count_filter=selector, exact=True).count > 0
+        except (UnexpectedResponse, ValueError) as exc:
+            if isinstance(exc, UnexpectedResponse) and exc.status_code != 404:
+                raise
+            if not self.client.collection_exists(self.COLLECTION_NAME):
+                return False
+            raise
 
-        # 执行删除
+    def _document_filter(self, file_id, *, system_policy=False, ownership=None):
+        from qdrant_client.models import Filter, FieldCondition, MatchValue, IsEmptyCondition, PayloadField
+
+        def equals(key, value):
+            exact = FieldCondition(key=key, match=MatchValue(value=value))
+            return exact if value != "" else Filter(should=[exact, IsEmptyCondition(is_empty=PayloadField(key=key))])
+
+        conditions = [equals("file_id", file_id)]
+        file_filter = Filter(must=conditions.copy())
+        if system_policy:
+            conditions.extend([equals("source_type", "default"), Filter(should=[
+                equals("scope", "system"), Filter(must=[equals("scope", ""), equals("owner_id", "")]),
+            ])])
+        elif ownership is not None:
+            from knowledge.kb import document_ownership
+            conditions.extend(equals(key, value) for key, value in document_ownership(ownership).items())
+        selector = Filter(must=conditions)
+        matches = self._count_document_points(selector)
+        if (system_policy or ownership is not None) and self._count_document_points(file_filter) != matches:
+            raise PolicyOwnershipConflict("文件 ID 对应不同归属的向量，已停止操作")
+        return selector, matches
+
+    def _count_document_points(self, selector):
+        return self.client.count(collection_name=self.COLLECTION_NAME, count_filter=selector, exact=True).count
+
+    def assert_document_ownership(self, file_id, *, ownership):
+        self._document_filter(file_id, ownership=ownership)
+
+    def delete_chunks_by_file_id(self, file_id: str, *, system_policy=False, ownership=None) -> int:
+        """等待归属匹配的文件向量删除，并确认余量归零。"""
+        if read_only_retrieval.get():
+            raise PermissionError("评测仅允许只读检索")
+        if not system_policy and ownership is None:
+            raise ValueError("删除向量前必须提供文件归属")
+        selector, deleted_count = self._document_filter(file_id, system_policy=system_policy, ownership=ownership)
         self.client.delete(
             collection_name=self.COLLECTION_NAME,
-            points_selector=Filter(
-                must=[
-                    FieldCondition(key="file_id", match=MatchValue(value=file_id))
-                ]
-            ),
+            points_selector=selector,
             wait=True,
         )
-        remaining = self.client.count(
-            collection_name=self.COLLECTION_NAME,
-            count_filter=Filter(must=[FieldCondition(key="file_id", match=MatchValue(value=file_id))]),
-            exact=True,
-        ).count
+        remaining = self._count_document_points(selector)
         if remaining:
             raise RuntimeError(f"云端仍有 {remaining} 个分块，删除未完成")
 
@@ -387,12 +413,12 @@ class QdrantService:
         )
         return deleted_count
 
-    def set_file_metadata(self, file_id: str, metadata: dict) -> None:
+    def set_file_metadata(self, file_id: str, metadata: dict, *, system_policy=False, ownership=None) -> None:
         if read_only_retrieval.get():
             raise PermissionError("评测仅允许只读检索")
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        selector, _ = self._document_filter(file_id, system_policy=system_policy, ownership=ownership)
         self.client.set_payload(collection_name=self.COLLECTION_NAME, payload=metadata,
-            points=Filter(must=[FieldCondition(key="file_id", match=MatchValue(value=file_id))]), wait=True)
+            points=selector, wait=True)
 
     def delete_all_chunks(self):
         """
@@ -419,12 +445,14 @@ class Neo4jService:
     REL_RELATED_TO = "RELATED_TO"
 
     def __init__(self):
+        self.driver = None
+        self.uri = os.getenv("NEO4J_URI", "").strip()
+        if not self.uri:
+            return
         if not _NEO4J_AVAILABLE:
-            self.driver = None
-            logging.warning("Neo4j Python 驱动未安装，图数据库服务不可用")
+            logging.info("已配置 Neo4j，但缺少可选驱动，已跳过图检索")
             return
 
-        self.uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
         self.user = os.getenv("NEO4J_USER", "neo4j")
         self.password = os.getenv("NEO4J_PASSWORD", "neo4j")
 
@@ -432,11 +460,14 @@ class Neo4jService:
             self.driver = GraphDatabase.driver(
                 self.uri,
                 auth=(self.user, self.password),
+                connection_timeout=float(os.getenv("NEO4J_CONNECT_TIMEOUT", "3")),
             )
             self.driver.verify_connectivity()
             logging.info("Neo4j 图数据库连接成功")
-        except Exception as e:
-            logging.error(f"Neo4j 连接失败: {e}")
+        except Exception as exc:
+            if self.driver is not None:
+                self.driver.close()
+            logging.warning("Neo4j 不可用，已跳过图检索（%s）", type(exc).__name__)
             self.driver = None
 
     def _extract_entities(self, text: str) -> List[str]:
@@ -935,7 +966,7 @@ class EmbeddingService:
                 elif self.neo4j.driver is None:
                     self.use_neo4j = False
             except Exception as e:
-                logging.warning(f"Neo4j 服务初始化失败，已禁用图检索: {e}")
+                logging.warning("Neo4j 服务初始化失败，已禁用图检索（%s）", type(e).__name__)
                 self.use_neo4j = False
 
         # ---------- 构建所有索引（Agent 检索模式下跳过，Qdrant 已有数据） ----------

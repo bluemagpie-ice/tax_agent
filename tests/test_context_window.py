@@ -79,6 +79,53 @@ def test_oversized_pinned_question_visible_error_and_no_request(budget):
     with pytest.raises(ValueError, match="未发送"):
         bounded_invoke(model, [SystemMessage(content="安全约束"), HumanMessage(content="超长当前问题" * 5000)])
     model.invoke.assert_not_called()
+    assert budget[-1]["budget_result"] == "rejected"
+    assert budget[-1]["estimated_required_message_tokens"] > budget[-1]["input_budget"]
+    assert budget[-1]["estimated_request_tokens"] is None
+
+
+def test_tiny_budget_can_omit_web_without_omitting_question(budget):
+    from agents.policy_context import policy_messages
+
+    url = "https://www.chinatax.gov.cn/policy"
+    web = policy_messages({"sources": [{"page_status": "success", "title": "适用条件" * 100, "url": url,
+                                       "content": "小型微利企业须同时满足所有政策条件。" * 200}]})
+    query = HumanMessage(content="小型微利企业有什么企业所得税优惠？")
+    selected, reserve = prepare_context(SimpleNamespace(), [query, *web], window=512, output_reserve=256)
+    assert selected == [query] and reserve == 256
+    report = budget[-1]
+    assert report["budget_result"] == "accepted" and report["web_evidence_omitted"] == 1
+    assert report["estimated_message_tokens_after"]["web_evidence"] == 0
+    assert report["estimated_request_tokens"] + reserve <= 512
+
+
+def test_openai_chat_budget_counts_tool_calls_once_and_ignores_sdk_metadata(budget):
+    from langchain_openai import ChatOpenAI
+
+    model = ChatOpenAI(model="unknown-custom-model", api_key="test-only")
+    args = {"query": "政策"}
+    call = AIMessage(content="", tool_calls=[{"name": "search", "args": args, "id": "call-1"}],
+                     additional_kwargs={"tool_calls": [{"id": "call-1", "type": "function",
+                                                        "function": {"name": "search", "arguments": json.dumps(args)}}]},
+                     response_metadata={"details": "不发送给模型" * 5000})
+    reply = ToolMessage(content="暂无结果", tool_call_id="call-1", artifact="不发送给模型" * 5000)
+    messages = [HumanMessage(content="短问题"), call, reply]
+    prepared, _ = prepare_context(model, messages)
+    assert prepared == messages
+    assert budget[-1]["estimated_tool_message_tokens_after"] < 300
+
+
+def test_policy_numbered_item_is_normalized_only_with_verified_announcement():
+    from agents.policy_context import normalize_policy_item_citations
+    from services.security import check_answer
+
+    source = {"title": "测试优惠公告", "document_number": "财政部 税务总局公告2023年第12号",
+              "content": "一、政策适用范围。\n二、政策申报条件。", "source_type": "default"}
+    answer = "依据财政部税务总局公告2023年第12号，原文第二条列明申报条件。"
+    normalized = normalize_policy_item_citations(answer, [source])
+    assert "“二、”项" in normalized and check_answer(normalized, [source])[1]["ok"]
+    for unsupported in (answer.replace("第二条", "第三条"), answer + "《另一文件》第二条。"):
+        assert normalize_policy_item_citations(unsupported, [source]) == unsupported
 
 
 def test_memory_background_can_be_trimmed_without_losing_current_question(budget):

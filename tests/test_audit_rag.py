@@ -45,3 +45,23 @@ def test_same_file_retry_is_idempotent_in_local_qdrant(document_app, tmp_path):
         assert embedding.qdrant.client.count(embedding.qdrant.COLLECTION_NAME).count == result["chunk_count"]
         assert len(embedding.store.get_chunks()) == result["chunk_count"]
     asyncio.run(verify())
+
+
+def test_missing_neo4j_driver_leaves_qdrant_and_bm25_independent(document_app, monkeypatch):
+    import uuid
+
+    import knowledge.embedding as module
+
+    _, _, _, existing, _ = document_app
+    monkeypatch.setattr(module, "_NEO4J_AVAILABLE", False)
+    monkeypatch.setenv("NEO4J_URI", "bolt://localhost:7687")
+    monkeypatch.setattr(module, "QdrantService", lambda: existing.qdrant)
+    monkeypatch.setattr(module.EmbeddingService, "_embed_texts", lambda self, texts: existing._embed_texts(texts))
+    store = existing.store
+    for index, text in enumerate(["增值税抵扣政策", "住房租赁登记", "企业所得税扣除"], start=1):
+        store.add_chunks([module.ChunkDocument(str(uuid.uuid4()), text, str(index), {"source_type": "default"})])
+    service = module.EmbeddingService(store, use_neo4j=True)
+    service.embedding_model = "fixture"
+    assert not service.use_neo4j
+    assert service.search("增值税", mode="semantic")
+    assert service.search("增值税", mode="bm25")[0]["file_id"] == "1"

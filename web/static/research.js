@@ -5,7 +5,8 @@
     let task = null, controller = null, busy = false, timer = null, statusAt = Date.now();
     const stages = {created:'待开始', understand:'提取业务事实', retrieve:'检索政策', report:'整理研究报告',
         cases:'比较历史案例', plan:'制定研究计划', assess:'核查研究证据', calculate:'核对计算条件', supplement:'补充研究', prepare_clarification:'等待补充事实',
-        finalized:'已确认定稿', awaiting_review:'等待报告复核', awaiting_facts:'等待补充事实', failed:'执行失败', interrupted:'执行已停止，可恢复'};
+        finalized:'已确认定稿', awaiting_review:'等待报告复核', awaiting_facts:'等待补充事实', failed:'执行失败',
+        insufficient_evidence:'证据不足', interrupted:'执行已停止，可恢复'};
     const node = (tag, text, parent) => { const n = document.createElement(tag); n.textContent = text; if(parent) parent.append(n); return n; };
     let fieldId=0;
     function field(parent,title,value='',multiline=true) {
@@ -38,8 +39,8 @@
             return value;
         };
     }
-    async function api(path, body, signal) {
-        const response = await TaxAuth.request('/api/research' + path, {method:body ? 'POST':'GET',
+    async function api(path, body, signal, method=body ? 'POST':'GET') {
+        const response = await TaxAuth.request('/api/research' + path, {method,
             headers:{'Content-Type':'application/json'}, body:body ? JSON.stringify(body):undefined, signal});
         if(!response.ok) { const data=await response.json().catch(() => ({})); throw new Error(typeof data.detail === 'string' ? data.detail : '请求失败，请刷新后重试'); }
         return response;
@@ -66,15 +67,16 @@
         el('research-run').hidden=!task || ['finalized','awaiting_review','awaiting_facts'].includes(task.status);
         if(!task) {el('research-status').textContent='创建研究任务后，进度和报告会保存在当前用户下。'; return;}
         renderStatus();
-        el('research-run').textContent=task.resume_stage || task.status === 'interrupted' ? '从已保存步骤恢复' : task.status === 'failed' ? '重新研究（从头执行）' : '开始研究';
+        el('research-run').textContent=task.resume_stage || task.status === 'interrupted' ? '从已保存步骤恢复'
+            : ['failed','insufficient_evidence'].includes(task.status) ? '重新研究（从头执行）' : '开始研究';
         const questionCount=task.question_count ?? task.questions?.length;
         if(questionCount) node('p',`初步证据已覆盖 ${task.completed_questions || 0}/${questionCount} 个子问题（仍需人工核验）`,result).id='research-coverage-count';
         if(task.failure) {
-            node('h3','尚未生成可复核报告',result);
+            node('h3',task.status === 'insufficient_evidence' ? '现有证据不足以生成可复核报告' : '尚未生成可复核报告',result);
             node('p',task.failure.message,result);
             const refs=task.failure.details?.unmatched_citations || task.failure.details?.validation?.unmatched_citations;
             if(refs?.length) node('p','未匹配的引用：'+refs.join('、'),result);
-            node('p',task.resume_stage ? '已保留证据，可从失败步骤恢复。' : '请查看证据缺口；重新研究将从头执行并重新检索。',result);
+            node('p',task.resume_stage ? '已保留证据，可从失败步骤恢复。' : '重新研究将从头执行并重新检索。',result);
         }
         if(task.status === 'awaiting_facts') {
             node('h3','待确认事实',result);
@@ -99,6 +101,7 @@
                 node('p',`${stages[item.stage] || item.stage} · ${(item.elapsed_ms/1000).toFixed(1)} 秒`,timings);
             }
         }
+        if(task.status !== 'running') renderTaskDeletion(result);
         if(!task.report) return;
         const report=task.report;
         node('h3',`研究报告 · 第 ${task.report_version} 版`,result); node('p',report.notice,result);
@@ -176,6 +179,37 @@
                 const cancel=node('button','取消保存',target); cancel.onclick=() => target.replaceChildren();
             });
         }
+    }
+    function renderTaskDeletion(result) {
+        const details=node('details','',result);
+        node('summary','删除研究任务',details);
+        const controls=node('div','',details);
+        const id=task.task_id;
+        details.ontoggle=() => {
+            if (!details.open || busy) return;
+            action(async () => {
+                const current=await (await api(`/tasks/${id}`)).json();
+                controls.replaceChildren();
+                node('p','将删除此任务的执行记录和报告版本。个人案例默认保留。',controls);
+                let includeCases;
+                if (current.linked_case_count) {
+                    const label=node('label','',controls);
+                    includeCases=node('input','',label);
+                    includeCases.type='checkbox';
+                    label.append(document.createTextNode(`同时删除关联的 ${current.linked_case_count} 个个人案例及其版本`));
+                }
+                const remove=node('button','确认删除研究任务',controls);
+                remove.onclick=() => action(async () => {
+                    await api(`/tasks/${id}`,{revision:current.revision,delete_cases:!!includeCases?.checked},undefined,'DELETE');
+                    task=null;
+                    render();
+                    await list();
+                    await loadCases();
+                    el('research-status').textContent='研究任务已删除。';
+                    el('research-task-list').focus();
+                });
+            });
+        };
     }
     async function action(fn) {
         if(busy) return;

@@ -111,6 +111,15 @@ class ResearchStore:
             conn.execute(update(self.tasks).where(self._owned(task_id), self.tasks.c.lease == lease).values(
                 lease=None, lease_until=None))
 
+    def delete(self, task_id, lease, *, case_store=None):
+        with self.engine.begin() as conn:
+            removed = conn.execute(self.tasks.delete().where(self._owned(task_id), self.tasks.c.lease == lease))
+            if removed.rowcount != 1:
+                raise ResearchConflict("研究任务执行租约已失效")
+            conn.execute(self.reports.delete().where(self.reports.c.task_id == task_id,
+                                                    self.reports.c.owner_id == require_tenant()))
+            return case_store.delete_linked(conn, task_id) if case_store is not None else []
+
     def history(self, task_id):
         self.get(task_id)
         with self.engine.connect() as conn:

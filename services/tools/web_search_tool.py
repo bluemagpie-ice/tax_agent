@@ -116,39 +116,37 @@ def delete_web_search_results(file_id: Optional[str] = None) -> dict:
     """
     try:
         from knowledge.embedding import EmbeddingService, PersistentDocumentStore
+        from knowledge.kb import document_ownership
+        from services.tools.kb_tools import _search_cache
 
         store = PersistentDocumentStore()
-        embedding = EmbeddingService(store=store, use_qdrant=True, skip_rebuild=True)
+        chunks = list(store.get_chunks())
+        tenant = current_tenant_id()
+        batches = {}
+        for chunk in chunks:
+            owner = document_ownership(chunk.metadata)
+            if chunk.file_id and (not file_id or chunk.file_id == file_id) and owner["source_type"] == "web_search":
+                if owner["owner_id"] == ("" if tenant == "default" else tenant):
+                    batches.setdefault(chunk.file_id, owner)
+        if file_id and not batches:
+            return {"status": "not_found", "deleted_count": 0, "message": "联网资料不存在或不属于当前用户"}
+        if not batches:
+            return {"deleted_count": 0, "message": "没有需要删除的联网资料"}
 
-        if file_id:
-            if current_tenant_id() != "default":
-                owned = [c for c in store.get_chunks() if c.file_id == file_id
-                         and (c.metadata or {}).get("owner_id") == current_tenant_id()
-                         and (c.metadata or {}).get("source_type") == "web_search"]
-                if not owned:
-                    raise PermissionError("联网资料不存在或不属于当前用户")
-            count = embedding.qdrant.delete_chunks_by_file_id(file_id)
-            PersistentDocumentStore.remove_by_file_id(file_id)
-            return {"deleted_count": count, "message": f"已删除 file_id={file_id} 的 {count} 条联网检索结果"}
-        else:
-            total = 0
-            web_file_ids = []
-            for chunk in store.get_chunks():
-                meta = getattr(chunk, "metadata", {}) or {}
-                if isinstance(meta, dict) and meta.get("source_type") == "web_search":
-                    if current_tenant_id() != "default" and meta.get("owner_id") != current_tenant_id():
-                        continue
-                    fid = getattr(chunk, "file_id", "") or ""
-                    if fid and fid not in web_file_ids:
-                        web_file_ids.append(fid)
-            for fid in web_file_ids:
-                count = embedding.qdrant.delete_chunks_by_file_id(fid)
-                total += count
-                PersistentDocumentStore.remove_by_file_id(fid)
-            return {"deleted_count": total, "message": f"已删除全部 {len(web_file_ids)} 批联网检索结果，共 {total} 条"}
-    except Exception as e:
-        logger.error(f"[web_search_tool] 删除失败: {e}")
-        return {"status": "error", "deleted_count": 0, "message": f"删除失败: {str(e)}"}
+        embedding = EmbeddingService(store=store, use_qdrant=True, skip_rebuild=True)
+        if embedding.qdrant is None:
+            raise RuntimeError("Qdrant 未连接")
+        total = 0
+        for fid, owner in batches.items():
+            if any(c.file_id == fid and document_ownership(c.metadata) != owner for c in chunks):
+                raise RuntimeError("文件 ID 对应不同归属的本地分块")
+            total += embedding.qdrant.delete_chunks_by_file_id(fid, ownership=owner)
+            PersistentDocumentStore.remove_by_file_id(fid)
+            _search_cache.clear()
+        return {"deleted_count": total, "message": f"已删除 {len(batches)} 批联网资料，共 {total} 条"}
+    except Exception as exc:
+        logger.warning("联网资料删除未完成（%s）", type(exc).__name__)
+        return {"status": "error", "message": "联网资料清理未完成，剩余记录可重试"}
 
 # ---- LangChain Tool 封装 ----
 

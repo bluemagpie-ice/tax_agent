@@ -4,12 +4,12 @@ import json
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, StrictInt, model_validator
+from pydantic import BaseModel, Field, StrictBool, StrictInt, model_validator
 from starlette.responses import StreamingResponse
 
 from services.research_store import ResearchConflict
 from services.research_cases import CaseContent
-from services.research_evidence import legacy_failed_report
+from services.research_evidence import EVIDENCE_GAP_CODES, legacy_failed_report
 
 
 class CreateResearch(BaseModel):
@@ -24,6 +24,11 @@ class RunResearch(BaseModel):
 
 class StreamRun(RunResearch):
     model_config = {"extra": "forbid"}
+
+
+class DeleteResearch(RunResearch):
+    model_config = {"extra": "forbid"}
+    delete_cases: StrictBool = False
 
 
 class ReviewResearch(RunResearch):
@@ -78,6 +83,8 @@ def build_router(auth, service):
             raise HTTPException(404, str(exc)) from exc
 
     def visible(task):
+        if task["status"] == "failed" and (task.get("failure") or {}).get("code") in EVIDENCE_GAP_CODES:
+            return {**task, "status": "insufficient_evidence"}
         if not legacy_failed_report(task):
             return task
         if task["status"] == "awaiting_review":
@@ -99,7 +106,19 @@ def build_router(auth, service):
 
     @router.get("/tasks/{task_id}")
     async def read(task_id: str):
-        return visible(lookup(task_id))
+        task = visible(lookup(task_id))
+        return {**task, "linked_case_count": len(service().case_store.linked(task_id))}
+
+    @router.delete("/tasks/{task_id}")
+    async def delete_task(task_id: str, body: DeleteResearch):
+        try:
+            return await service().delete_task(task_id, body.revision, delete_cases=body.delete_cases)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ResearchConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(503, "研究任务删除未完成，请稍后重试") from exc
 
     @router.get("/tasks/{task_id}/reports")
     async def history(task_id: str):
@@ -135,6 +154,12 @@ def build_router(auth, service):
                     raise ResearchConflict("来源研究报告尚未定稿或版本已变化")
                 if source_task.get("evaluation_run"):
                     raise ResearchConflict("评测结果不得回流正式案例库")
+                store = service().store
+                lease = store.claim(source, source_task["revision"])
+                try:
+                    return service().case_store.create(content, source_task_id=source, source_report_version=body["source_report_version"])
+                finally:
+                    store.release(source, lease)
             return service().case_store.create(content, source_task_id=source, source_report_version=body.get("source_report_version"))
         except (ValueError, ResearchConflict) as exc:
             raise HTTPException(422, str(exc)) from exc

@@ -57,7 +57,8 @@ def test_full_flow_change_diff_and_retry(pipeline, caplog):
     changed = updater.run_once()
     assert changed.changed == changed.ingested == 1 and changed.duplicated == 0
     assert len(calls) == 2 and calls[0][1]["file_id"] != calls[1][1]["file_id"]
-    cloud.qdrant.set_file_metadata.assert_called_once_with(calls[0][1]["file_id"], {"is_current":False,"superseded_by":calls[1][1]["file_id"],"validity_check":"superseded"})
+    cloud.qdrant.set_file_metadata.assert_called_once_with(calls[0][1]["file_id"],
+        {"superseded_by": calls[1][1]["file_id"]}, system_policy=True)
     assert calls[1][1]["source_type"] == "default" and calls[1][1]["scope"] == "system"
     diff = updater.tracker.get_change_diff(old.unique_key)
     assert diff["old_hash"] == old.content_hash and diff["old_snapshot_available"]
@@ -86,6 +87,31 @@ def test_same_batch_hash_dedup_and_failed_result(pipeline):
     kb.ingest_file = success
     assert updater.run_once().ingested == 1
     assert updater.run_once().duplicated == 2 and len(calls) == 1
+
+
+def test_republished_policy_and_old_versions_remain_deduplicated_after_restart(tmp_path):
+    db = str(tmp_path / "policy.db")
+    tracker = PolicyTracker(db)
+    document_number = "财政部税务总局公告2026年第1号"
+    metadata = {"document_number": document_number}
+    old = PolicyItem("sta", "1", content="第一条\n旧规则。\n特此公告。\n附件：清单.pdf",
+                     url="https://fgk.chinatax.gov.cn/old", metadata=metadata)
+    mirror = PolicyItem("mof", "2", content=document_number + "\n第一条 旧规则。\n特此公告。\n附件：清单",
+                        url="https://szs.mof.gov.cn/mirror", metadata=metadata)
+    assert old.mirror_hash == mirror.mirror_hash
+    for item in (old, PolicyItem("sta", "1", content="第二版"), PolicyItem("sta", "1", content="第三版")):
+        assert tracker.upsert_pending(item)[0]
+        tracker.mark_ingested(item.unique_key, tracker.ingest_file_id(item), mirror_hash=item.mirror_hash)
+    tracker.close()
+    tracker = PolicyTracker(db)
+    try:
+        assert tracker.upsert_pending(old) == (False, False)
+        assert tracker.upsert_pending(mirror) == (False, False)
+        rows = tracker._conn.execute("SELECT content_hash, previous_hash FROM policy_version WHERE unique_key=?",
+                                     (old.unique_key,)).fetchall()
+        assert len(rows) == 3 and any(row["previous_hash"] == old.content_hash for row in rows)
+    finally:
+        tracker.close()
 
 
 def test_date_window_and_unknown_date(pipeline):

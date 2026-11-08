@@ -25,6 +25,7 @@ class ScriptedModel:
         self.responses = iter(responses)
         self.reviews = iter(reviews) if reviews is not None else None
         self.histories = []
+        self.review_histories = []
 
     def bind_tools(self, tools, **kwargs):
         self.bound_names = {t.name for t in tools}
@@ -32,6 +33,7 @@ class ScriptedModel:
 
     def invoke(self, history, **kwargs):
         if history[0].content.startswith("你是独立税务审校员"):
+            self.review_histories.append(history)
             verdict = next(self.reviews) if self.reviews is not None else {"ok": True, "issues": [], "corrected_answer": ""}
             if isinstance(verdict, Exception):
                 raise verdict
@@ -89,6 +91,197 @@ def test_no_search_question_has_no_tool_calls(tmp_path, caplog):
     assert result["final_answer"] == "你好"
     assert result["tool_evidence"] == []
     assert '"tools": []' in caplog.text
+
+
+@pytest.mark.parametrize("expected", ["disabled", "success", "no_results", "read_failed", "request_failed"])
+def test_chat_stream_executes_selected_live_search_even_if_model_skips_tools(tmp_path, monkeypatch, expected):
+    from fastapi.testclient import TestClient
+    from requests import Response, Timeout
+    from services.tools import kb_tools
+    import web.main as main
+
+    url = "https://fgk.chinatax.gov.cn/zcfgk/c100012/c12345/content.html"
+    policy = "本公告规定了测试用政策正文，适用条件以公开文件列明的范围为准。"
+    calls = []
+
+    def get(url_requested, **kwargs):
+        calls.append(url_requested)
+        if expected == "request_failed":
+            raise Timeout()
+        response = Response()
+        response.status_code = 200
+        response.encoding = "utf-8"
+        response._content_consumed = True
+        if url_requested.endswith("/search/s"):
+            rows = [] if expected == "no_results" else [{"url": url, "title": "测试政策公告"}]
+            response._content = json.dumps({"searchResultAll": {"searchTotal": rows}}).encode()
+        elif url_requested == url:
+            response.headers["Content-Type"] = "text/html"
+            body = f'<div class="arc_cont">{policy}</div>' if expected == "success" else "<body>只有网站导航</body>"
+            response._content = ('<meta name="PubDate" content="2026-04-07">' + body).encode()
+        elif kwargs["params"].get("format") == "rss":
+            response._content = b"<rss><channel></channel></rss>"
+        else:
+            response._content = b'<ul id="b_results"><li class="b_no">No results</li></ul>'
+        return response
+
+    agent = make_agent(tmp_path, [AIMessage(content="根据已取得的资料回答。")])
+    monkeypatch.setattr(main, "tax_agent", agent)
+    monkeypatch.setattr(main, "conversation_memory", None)
+    monkeypatch.setattr(kb_tools.requests, "get", get)
+    query = "小型微利企业有什么企业所得税优惠？"
+    response = TestClient(main.app).post("/api/chat/stream", headers={"Authorization": USER_BEARER},
+        json={"user_id": "web_user", "query": query, "session_id": "live-policy", "web_search": expected != "disabled"})
+    assert response.status_code == 200, response.text
+    assert f'"web_search_status": "{expected}"' in response.text
+    assert bool(calls) == (expected != "disabled")
+    assert (url in calls) == (expected in ("success", "read_failed"))
+    model_input = " ".join(message.content for message in agent.llm.histories[0])
+    assert agent.llm.histories[0][-1].content == query
+    assert (policy in model_input) == (expected == "success")
+    assert "只有网站导航" not in model_input
+    if expected == "success":
+        assert "2026-04-07" in response.text and url in response.text
+    elif expected != "disabled":
+        assert "联网检索未成功，本次回答仅参考本地知识库。" in response.text
+
+
+def test_long_live_policy_keeps_applicability_and_isolated_multi_turn_context(tmp_path, monkeypatch, caplog):
+    from agents import streaming
+    from agents.policy_context import WEB_POLICY
+    from services.tools import kb_tools
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    monkeypatch.setenv("LLM_CONTEXT_WINDOW", "8192")
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "1536")
+    monkeypatch.setattr(streaming, "count_tokens", lambda text, name="": (len(str(text).encode()), "utf8_test_estimate"))
+    query = "小型微利企业有什么企业所得税优惠？"
+    url = "https://fgk.chinatax.gov.cn/zcfgk/c100012/c12345/content.html"
+    clause = "小型微利企业所得税优惠须同时符合公告所列条件。"
+    condition = "同时符合从业人数、资产总额、年度应纳税所得额限制。"
+    secret_history = "PRIVATE_TEST_HISTORY"
+    agent = make_agent(tmp_path, [AIMessage(content=f"已取得测试原文，适用条件见 {url}")] * 3)
+    agent.get_memory_context.return_value = {"prompt_text": secret_history * 1000}
+    model = agent.llm
+    model.bind_tools = lambda tools, **kwargs: SimpleNamespace(
+        bound=model, kwargs={"tools": [convert_to_openai_tool(t) for t in tools]}, invoke=model.invoke)
+    # Keep this test's provider-independent estimate small enough for realistic evidence space.
+    tool = StructuredTool.from_function(func=lambda query: "{}", name="search_tax_policy",
+                                        description="查找政策", args_schema=QueryInput)
+    agent.workflow_tools = lambda state: {tool.name: tool}
+    search = MagicMock(return_value=("success", [{"url": url, "snippet": "SEARCH_SUMMARY_ONLY"}]))
+    read = MagicMock(return_value={"status": "success", "url": url, "title": "小型微利企业所得税优惠",
+                                  "document_number": "测试文号", "issuer": "测试机关",
+                                  "publish_date": "2026-01-01", "effective_date": "2026年2月1日",
+                                  "content": "无关背景资料。\n" * 140 + clause + "\n" + condition + "\n" + "其他内容。\n" * 200,
+                                  "truncated": True})
+    monkeypatch.setattr(kb_tools, "search_live_policy_candidates", search)
+    monkeypatch.setattr(kb_tools, "read_web_page", read)
+
+    async def chat():
+        return [await agent.run(query, {"thread_id": "workflow", "web_search": enabled})
+                for enabled in (True, True, False)]
+
+    with caplog.at_level("INFO"):
+        results = asyncio.run(chat())
+    assert search.call_count == read.call_count == 2
+    assert url in results[0] and "部分官网正文因上下文预算" in results[0]
+    assert "自我校验未完成" not in results[0]
+    assert secret_history not in caplog.text and clause not in caplog.text and "SEARCH_SUMMARY_ONLY" not in caplog.text
+    for history in model.histories[:2]:
+        records = [json.loads(m.content) for m in history if m.additional_kwargs.get("context_kind") == WEB_POLICY]
+        assert len(records) == 1
+        record = records[0]
+        assert record["url"] == url and record["effective_date"] == "2026-02-01"
+        assert record["document_number"] == "测试文号" and record["issuer"] == "测试机关"
+        assert record["publish_date"] == "2026-01-01" and "证据不完整" in record["context_notice"]
+        assert clause in record["content"] and condition in record["content"]
+        assert history[-1].content == query
+    assert not any(m.additional_kwargs.get("context_kind") == WEB_POLICY for m in model.histories[-1])
+    assert any(clause in m.content for m in model.review_histories[0])
+    assert agent.record_turn.call_args.kwargs["user_message"] == query
+
+
+def test_deepseek_official_chat_sends_reserved_output_as_max_tokens(tmp_path):
+    import httpx
+    from langchain_openai import ChatOpenAI
+
+    requests = []
+    def reply(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "test", "model": "deepseek-flash",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "答复"}, "finish_reason": "stop"}]})
+
+    agent = make_agent(tmp_path, [])
+    with httpx.Client(transport=httpx.MockTransport(reply)) as client:
+        agent.llm = ChatOpenAI(model="deepseek-flash", api_key="test-only",
+                               base_url="https://api.deepseek.com/v1", http_client=client)
+        response = agent._invoke_chat(agent.llm, [HumanMessage(content="短问题")], 256)
+    assert response.content == "答复"
+    assert requests[0]["max_tokens"] == 256
+    assert "max_completion_tokens" not in requests[0]
+
+
+def test_web_reflection_gets_citation_diagnostics_before_publishing(tmp_path):
+    url = "https://fgk.chinatax.gov.cn/zcfgk/c100012/c12345/content.html"
+    bad_draft = "《测试公告》第二条列明了优惠范围。"
+    corrected = f"测试公告的原文编号为二、，请核对官网正文 {url}"
+    agent = make_agent(tmp_path, [AIMessage(content=bad_draft)])
+    agent.llm.reviews = iter([{"ok": False, "issues": ["条号格式与原文不符"], "corrected_answer": corrected}])
+    result = execute(agent, "查询测试公告", web_search=True, web_policy={"status": "success", "sources": [{
+        "page_status": "success", "title": "测试公告", "url": url, "content": "二、优惠范围以已列明的条件为准。",
+    }]})
+    review = json.loads(agent.llm.review_histories[0][-1].content)
+    assert review["unmatched_citations"] == ["第二条"]
+    assert result["final_answer"] == corrected and result["guardrails"]["ok"]
+
+
+@pytest.mark.parametrize("schema_size", [3550, 4350])
+def test_policy_receipt_fits_budget_and_duplicate_search_reuses_result(tmp_path, monkeypatch, schema_size):
+    from agents import streaming
+    monkeypatch.setattr(streaming, "count_tokens", lambda text, name="": (len(str(text).encode()), "test"))
+    monkeypatch.setenv("LLM_CONTEXT_WINDOW", "8192")
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "1536")
+    names = []
+    def search(query):
+        names.append(query)
+        return json.dumps({"found": 5, "results": [
+            {"title": f"政策 {i}", "url": f"https://example.com/{i}", "content": "政策原文" * 700,
+             "articles": ["长条文索引"] * 500} for i in range(5)]}, ensure_ascii=False)
+    tool = StructuredTool.from_function(func=search, name="search_tax_policy", description="政策检索", args_schema=QueryInput)
+    responses = [call(tool.name, {"query": "输入税额"})]
+    if schema_size == 3550:
+        responses.append(call(tool.name, {"query": "  输入税额 "}, "second"))
+    responses.append(AIMessage(content="已核对资料，仍需核对具体适用条件。"))
+    agent = make_agent(tmp_path, responses)
+    agent.max_tool_rounds = 3
+    agent.workflow_tools = lambda state: {tool.name: tool}
+    model = agent.llm
+    model.bind_tools = lambda tools, **kwargs: SimpleNamespace(
+        bound=model, kwargs={"tools": [{"description": "x" * schema_size}]}, invoke=model.invoke)
+    result = execute(agent, "核对输入税额")
+    assert names == ["输入税额"]
+    assert result["final_answer"].startswith("已核对资料")
+    assert len(result["tool_evidence"]) == 1
+    reply = model.histories[1][-1]
+    assert isinstance(reply, ToolMessage) and reply.tool_call_id == "call-1"
+    observed = json.loads(reply.content)
+    assert observed["context_notice"] and observed["results"][0]["url"] == "https://example.com/0"
+
+
+def test_chat_sse_budget_error_is_terminal_and_actionable(monkeypatch):
+    from fastapi.testclient import TestClient
+    from agents.streaming import ContextBudgetError
+    import web.main as main
+
+    mock = AsyncMock(side_effect=ContextBudgetError("请缩小问题或分批查询。"))
+    monkeypatch.setattr(main, "tax_agent", SimpleNamespace(run=mock))
+    monkeypatch.setattr(main, "conversation_memory", None)
+    response = TestClient(main.app).post("/api/chat/stream", headers={"Authorization": USER_BEARER},
+                                         json={"user_id": "test", "query": "请核对进项税额", "session_id": "budget"})
+    assert response.status_code == 200, response.text
+    assert "event: error" in response.text and "event: done" not in response.text
+    assert "context_budget" in response.text and "请缩小问题" in response.text
 
 
 def test_round_limit_stops_even_if_model_keeps_calling(tmp_path):

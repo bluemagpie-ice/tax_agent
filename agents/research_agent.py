@@ -23,7 +23,8 @@ from pydantic import BaseModel, Field
 
 from agents.base_agent import BaseAgent
 from agents.streaming import count_tokens, invoke_prepared, prepare_context
-from services.research_evidence import compact_evidence, legacy_failed_report, normalize_evidence, restore_policy_metadata, source_version, validate_report, official_url
+from services.research_evidence import (EVIDENCE_GAP_CODES, compact_evidence, legacy_failed_report, normalize_evidence,
+                                        restore_policy_metadata, source_version, validate_report, official_url)
 from services.research_store import ResearchConflict, utcnow
 from services.security import checkpoint_thread_id, require_tenant, document_visible
 
@@ -684,12 +685,21 @@ class ResearchAgent(BaseAgent):
         assessment = data.get("assessment") or {"coverage": []}
         covered = [item for item in assessment["coverage"] if item["sufficient"]]
         if not covered or not assessment["coverage"][0]["sufficient"]:
-            if data.get("stop_reason") == "budget_exhausted":
-                raise ResearchBudgetExceeded("证据核查未完成，模型调用预算已耗尽")
+            if data.get("stop_reason") in ("budget_exhausted", "tool_budget_exhausted"):
+                raise ResearchBudgetExceeded("证据核查未完成，模型或工具调用预算已耗尽")
+            retrieval_errors = sorted({call["tool"] for call in data.get("metrics", {}).get("tool_calls", [])
+                                       if call.get("status") == "error"
+                                       and call["tool"] in ("search_tax_policy", "search_web_policy", "read_web_page")})
+            if not data.get("candidates") and retrieval_errors:
+                raise ResearchFailure("retrieval_failed", "政策检索未完成，请检查知识库或官网连接后重试",
+                                      details={"tools": retrieval_errors})
             if data.get("candidates") and not any(e["source_check"] == "official_domain" for e in data["candidates"]):
                 raise ResearchFailure("policy_source_unverified", "候选资料的官方来源无法核对，核心问题仍缺少依据",
                                       details={"stop_reason": data.get("stop_reason")})
-            raise ResearchFailure("insufficient_evidence", "核心研究问题缺少足够的政策依据，请查看证据缺口后补检",
+            message = "核心研究问题缺少足够的政策依据，请查看证据缺口后补检"
+            if not data.get("candidates") and not data.get("web_search"):
+                message = "知识库未找到可用政策。可导入相关政策，或开启官网检索后重新研究。"
+            raise ResearchFailure("insufficient_evidence", message,
                                   details={"stop_reason": data.get("stop_reason")})
         ids = {eid for item in covered for eid in item["evidence_ids"]}
         evidence = [item for item in data["evidence"] if item["evidence_id"] in ids]
@@ -794,7 +804,8 @@ class ResearchAgent(BaseAgent):
                                 return {"data": data}
                             if isinstance(exc, ResearchBudgetExceeded):
                                 exc = ResearchFailure("research_budget_exhausted", str(exc))
-                            data.update(status="failed", failure={"code": exc.code, "message": str(exc),
+                            status = "insufficient_evidence" if exc.code in EVIDENCE_GAP_CODES else "failed"
+                            data.update(status=status, failure={"code": exc.code, "message": str(exc),
                                                                  "details": exc.details})
                             if exc.code in ("model_call_failed", "structured_output_invalid"):
                                 data["resume_stage"] = _name
@@ -812,7 +823,7 @@ class ResearchAgent(BaseAgent):
                           "report": "review"}
                 for source, route in routes.items():
                     def next_node(state, route=route):
-                        if state["data"]["status"] == "failed":
+                        if state["data"]["status"] in ("failed", "insufficient_evidence"):
                             return END
                         return route(state) if callable(route) else route
                     graph.add_conditional_edges(source, next_node)
@@ -824,11 +835,23 @@ class ResearchAgent(BaseAgent):
     def config(self, task_id):
         return {"configurable": {"thread_id": checkpoint_thread_id("research:" + task_id)}, "recursion_limit": 60}
 
+    async def delete_task(self, task_id, revision, *, delete_cases=False):
+        task = self.store.get(task_id)
+        lease = self.store.claim(task_id, revision)
+        try:
+            if task["status"] != "created" or task["revision"] != 1:
+                if not await self.delete_thread("research:" + task_id):
+                    raise RuntimeError("无法清理研究检查点")
+            deleted_cases = self.store.delete(task_id, lease, case_store=self.case_store if delete_cases else None)
+            return {"task_id": task_id, "status": "deleted", "deleted_case_ids": deleted_cases}
+        finally:
+            self.store.release(task_id, lease)
+
     async def execute(self, task_id, revision, *, action=None, emit=None):
         data = self.store.get(task_id)
         lease = self.store.claim(task_id, revision)
         resume_failed = data["status"] == "failed" and bool(data.get("resume_stage"))
-        restart = (data["status"] == "failed" and not resume_failed) or legacy_failed_report(data)
+        restart = (data["status"] in ("failed", "insufficient_evidence") and not resume_failed) or legacy_failed_report(data)
         metrics = copy.deepcopy(data.get("metrics", {"llm_calls": [], "tool_calls": []}))
         if restart or (action or {}).get("action") == "research_again":
             metrics = {"llm_calls": [], "tool_calls": []}

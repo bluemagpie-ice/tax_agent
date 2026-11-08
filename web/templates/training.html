@@ -205,7 +205,10 @@
                     const rpt = d.latest_report;
                     if (lastPolicyReportId !== null && lastPolicyReportId !== rpt.id) {
                         loadReports();
-                        if (!policyRequestActive) policyToast(`政策更新完成：新增 ${rpt.new} 条，变更 ${rpt.changed||0} 条` + (rpt.failed ? `，失败 ${rpt.failed} 条（查看报告）` : ''), !!rpt.failed);
+                        if (!policyRequestActive) {
+                            const incomplete = rpt.failed || rpt.errors?.length;
+                            policyToast(`政策更新结束，已入库 ${rpt.ingested} 条` + (incomplete ? '，有未完成项，请查看报告' : ''), !!incomplete);
+                        }
                     }
                     lastPolicyReportId = rpt.id;
                     document.getElementById('policy-update-msg').textContent =
@@ -224,9 +227,10 @@
                 const d = await r.json();
                 const rpt = d.report;
                 if (!r.ok || !rpt) throw new Error(d.detail || '政策更新请求失败');
+                const summary = d.success ? '更新完成' : '更新结束，有未完成项';
                 document.getElementById('policy-update-msg').textContent =
-                    `更新完成! 扫描 ${rpt.scanned} 新增 ${rpt.new} 变更 ${rpt.changed||0} 入库 ${rpt.ingested} 重复 ${rpt.duplicated} 失败 ${rpt.failed}` + (rpt.errors?.length ? '\n错误: ' + rpt.errors.join('\n') : '');
-                policyToast(`政策更新完成：新增 ${rpt.new} 条，变更 ${rpt.changed||0} 条` + (rpt.failed ? `，失败 ${rpt.failed} 条（查看报告）` : ''), !!rpt.failed);
+                    `${summary}。扫描 ${rpt.scanned} 新增 ${rpt.new} 变更 ${rpt.changed||0} 入库 ${rpt.ingested} 重复 ${rpt.duplicated} 失败 ${rpt.failed}` + (rpt.errors?.length ? '\n错误: ' + rpt.errors.join('\n') : '');
+                policyToast(`${summary}，已入库 ${rpt.ingested} 条` + (!d.success ? '，请查看报告' : ''), !d.success);
                 loadPolicyStatus(); loadSources(); loadReports();
             } catch (e) {
                 document.getElementById('policy-update-msg').textContent = '更新失败: ' + e.message;

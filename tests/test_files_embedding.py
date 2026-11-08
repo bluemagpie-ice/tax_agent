@@ -6,6 +6,7 @@ import sys
 import os
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -219,6 +220,7 @@ class TestFullRAGPipeline:
             f.write(test_content)
             temp_file_path = f.name
 
+        test_file_id = f"rag_test_{uuid.uuid4().hex}"
         try:
             # ---------- 第2步：文档解析 ----------
             print("\n[步骤1] 文档解析...")
@@ -232,7 +234,7 @@ class TestFullRAGPipeline:
             chunks = split_text(
                 text=markdown_text,
                 preset_id="general",
-                file_id="rag_test_001",
+                file_id=test_file_id,
                 chunk_size=300,
                 chunk_overlap=80,
             )
@@ -289,7 +291,7 @@ class TestFullRAGPipeline:
             try:
                 from knowledge.embedding import QdrantService
                 qdrant = QdrantService()
-                qdrant.delete_chunks_by_file_id("rag_test_001")
+                qdrant.delete_chunks_by_file_id(test_file_id, ownership={})
                 print("  Qdrant 测试数据已清理")
             except Exception as e:
                 print(f"  清理失败（可能集合不存在）: {e}")

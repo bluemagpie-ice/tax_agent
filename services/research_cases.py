@@ -98,11 +98,39 @@ class CaseStore:
                                self.cases.c.status != "deleted")).scalars().all()
         return [self.get(case_id) for case_id in ids]
 
+    def linked(self, task_id):
+        with self.engine.connect() as conn:
+            return [dict(row) for row in self._linked_rows(conn, task_id)]
+
+    def _linked_rows(self, conn, task_id):
+        return conn.execute(select(self.cases.c.case_id, self.cases.c.revision, self.cases.c.current_version).where(
+            self.cases.c.owner_id == require_tenant(), self.cases.c.source_task_id == task_id,
+            self.cases.c.status != "deleted")).mappings().all()
+
+    def delete_linked(self, conn, task_id):
+        rows = self._linked_rows(conn, task_id)
+        for row in rows:
+            self._delete(conn, row["case_id"], row["revision"], row["current_version"])
+        return [row["case_id"] for row in rows]
+
+    def _delete(self, conn, case_id, revision, version):
+        changed = conn.execute(update(self.cases).where(
+            self._owned(case_id), self.cases.c.revision == revision, self.cases.c.status != "deleted"
+        ).values(revision=revision+1, updated_at=utcnow(), published_version=None, status="deleted"))
+        if changed.rowcount != 1:
+            raise ResearchConflict("案例已被其他操作修改")
+        conn.execute(delete(self.versions).where(self.versions.c.case_id == case_id))
+        self._event(conn, case_id, "delete", version)
+
     def change(self, case_id, revision, action, *, content=None, notes=""):
         case = self.get(case_id)
         if revision != case["revision"]:
             raise ResearchConflict("案例版本已变化，请刷新后重试")
         version = case["current_version"]
+        if action == "delete":
+            with self.engine.begin() as conn:
+                self._delete(conn, case_id, revision, version)
+            return {"case_id": case_id, "status": "deleted"}
         with self.engine.begin() as conn:
             changed = conn.execute(update(self.cases).where(self._owned(case_id), self.cases.c.revision == revision).values(
                 revision=revision+1, updated_at=utcnow()))
@@ -133,13 +161,10 @@ class CaseStore:
                 conn.execute(update(self.cases).where(self._owned(case_id)).values(published_version=version, status="published"))
             elif action == "withdraw":
                 conn.execute(update(self.cases).where(self._owned(case_id)).values(published_version=None, status="withdrawn"))
-            elif action == "delete":
-                conn.execute(delete(self.versions).where(self.versions.c.case_id == case_id))
-                conn.execute(update(self.cases).where(self._owned(case_id)).values(published_version=None, status="deleted"))
             else:
                 raise ValueError("未知案例操作")
             self._event(conn, case_id, action, version)
-        return {"case_id": case_id, "status": "deleted"} if action == "delete" else self.get(case_id)
+        return self.get(case_id)
 
     def history(self, case_id):
         self.get(case_id)

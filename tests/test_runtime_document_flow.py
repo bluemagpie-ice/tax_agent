@@ -29,6 +29,7 @@ def document_app(tmp_path, monkeypatch):
     monkeypatch.setattr(repos, "SessionLocal", sessionmaker(bind=engine))
     monkeypatch.setitem(main.PATHS, "data", str(tmp_path / "data"))
     monkeypatch.setattr("services.paths.DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(main, "policy_updater", None)
     monkeypatch.setitem(main.PATHS, "uploads", str(tmp_path / "uploads"))
     (tmp_path / "uploads").mkdir()
     from agents.memory import ConversationMemory
@@ -39,6 +40,9 @@ def document_app(tmp_path, monkeypatch):
     from qdrant_client.models import VectorParams, Distance
     cloud.client.create_collection(cloud.COLLECTION_NAME, vectors_config=VectorParams(size=4, distance=Distance.COSINE))
     embedding = EmbeddingService.__new__(EmbeddingService)
+    monkeypatch.setattr(PersistentDocumentStore, "_file_path", tmp_path / "document_store.json")
+    monkeypatch.setattr(PersistentDocumentStore, "_shared_chunks", [])
+    monkeypatch.setattr(PersistentDocumentStore, "_loaded", False)
     embedding.store = PersistentDocumentStore()
     embedding.qdrant = cloud
     embedding.use_qdrant = True
@@ -108,15 +112,22 @@ def test_upload_browse_scopes_restart_and_delete(document_app):
     assert not Path(path).exists()
     from database.repositories import KnowledgeFileRepository
     assert KnowledgeFileRepository().get_by_business_id(global_id) is None
+    assert all(f["file_id"] != global_id for f in asyncio.run(QdrantKnowledgeBase(main.PATHS["data"]).list_files()))
+    PersistentDocumentStore._loaded = False
+    PersistentDocumentStore._shared_chunks = []
+    assert all(chunk.file_id != global_id for chunk in PersistentDocumentStore().get_chunks())
 
 
-def test_cloud_failure_retains_mapping_and_retry_finishes(document_app):
+@pytest.mark.parametrize("connection_error", [True, False])
+def test_cloud_failure_retains_mapping_and_retry_finishes(document_app, connection_error):
     _, client, service, embedding, _ = document_app
     fid = upload(client)
     from pathlib import Path
     path = Path(service._kb._metadata["files"][0]["file_path"])
-    with patch.object(embedding.qdrant.client, "delete", side_effect=ConnectionError("simulated cloud failure")):
+    failure = ConnectionError("simulated cloud failure") if connection_error else None
+    with patch.object(embedding.qdrant.client, "delete", side_effect=failure) as delete:
         response = client.delete(f"/api/knowledge/files/{fid}", headers=USER)
+    assert delete.call_args.kwargs["wait"] is True
     assert response.status_code == 500
     assert path.exists()
     assert service._kb._metadata["files"][0]["status"] == "delete_failed"
@@ -146,6 +157,129 @@ def test_vector_upload_failure_is_not_reported_as_success(document_app):
     assert service._kb._metadata["files"][0]["status"] == "upload_failed"
 
 
+def test_delete_rejects_conflicting_cloud_owner_without_removing_either_file(document_app):
+    from pathlib import Path
+    from qdrant_client.models import PointStruct
+
+    _, client, service, embedding, _ = document_app
+    fid = upload(client)
+    cloud = embedding.qdrant
+    original = cloud.client.scroll(cloud.COLLECTION_NAME)[0][0]
+    cloud.client.upsert(cloud.COLLECTION_NAME, [
+        PointStruct(id=77, vector=[1., 0., 0., 0.], payload={**original.payload, "owner_id": "other-user"})
+    ])
+    record = service._kb._metadata["files"][0]
+    assert client.delete(f"/api/knowledge/files/{fid}", headers=USER).status_code == 500
+    assert Path(record["file_path"]).exists() and record["status"] == "active"
+    assert cloud.client.count(cloud.COLLECTION_NAME).count == 2
+    assert any(c.file_id == fid for c in embedding.store.get_chunks())
+
+
+def test_legacy_web_batch_delete_stays_within_tenant(document_app, monkeypatch):
+    from uuid import uuid4
+    from knowledge.embedding import ChunkDocument
+
+    _, client, _, embedding, _ = document_app
+    documents = [
+        ChunkDocument(str(uuid4()), "legacy web result", fid,
+                      {"source_type": "web_search", "scope": "global", "owner_id": owner})
+        for fid, owner in [("my-web", "user_001"), ("other-web", "user_000")]
+    ]
+    embedding.add_chunks(documents)
+    embedding.store.add_chunks(documents)
+    monkeypatch.setattr("knowledge.embedding.EmbeddingService", lambda **kwargs: embedding)
+    assert client.delete("/api/knowledge/web-search?file_id=other-web", headers=USER).status_code == 404
+    response = client.delete("/api/knowledge/web-search", headers=USER)
+    assert response.status_code == 200 and response.json()["deleted_count"] == 1
+    assert {chunk.file_id for chunk in embedding.store.get_chunks()} == {"other-web"}
+    assert embedding.qdrant.client.count(embedding.qdrant.COLLECTION_NAME).count == 1
+
+
+def test_abandoned_upload_before_cloud_write_can_be_deleted_without_qdrant(document_app):
+    from pathlib import Path
+
+    _, client, service, embedding, _ = document_app
+    embedding.qdrant = None
+    response = client.post("/api/knowledge/upload", headers=USER, data={"scope": "global"},
+        files={"file": ("unfinished.md", b"unfinished document")})
+    assert response.status_code == 502
+    record = service._kb._metadata["files"][0]
+    record["status"] = "uploading"
+    service._kb.save_metadata()
+    url = f"/api/knowledge/files/{record['file_id']}"
+    assert client.delete(url, headers=USER).status_code == 200
+    assert not Path(record["file_path"]).exists()
+    assert client.delete(url, headers=USER).status_code == 404
+
+
+@pytest.mark.parametrize("status", ["active", "delete_failed", "upload_failed"])
+def test_delete_relocated_session_upload(document_app, tmp_path, status):
+    from pathlib import Path
+    from shutil import copyfile
+    from database.models import KnowledgeFiles
+    from database.repositories import KnowledgeChunkRepository, SessionLocal
+
+    _, client, service, embedding, _ = document_app
+    assert client.post("/api/conversations", headers=USER, json={"session_id": "moved"}).status_code == 200
+    if status == "upload_failed":
+        with patch.object(embedding, "_embed_texts", side_effect=RuntimeError("test failed upload")):
+            response = client.post("/api/knowledge/upload", headers=USER,
+                                   data={"scope": "session", "session_id": "moved"},
+                                   files={"file": ("demo.md", b"test file")})
+        assert response.status_code == 502
+    else:
+        upload(client, "session", "moved")
+    record = service._kb._metadata["files"][0]
+    fid = record["file_id"]
+    current = Path(record["file_path"])
+    historical = tmp_path / "old_checkout" / "uploads" / current.name
+    historical.parent.mkdir(parents=True)
+    copyfile(current, historical)
+    record.update(file_path=str(historical), status=status)
+    service._kb.save_metadata()
+    with SessionLocal() as session:
+        sql = session.query(KnowledgeFiles).filter_by(business_id=fid).first()
+        sql_id = sql.id if sql else None
+        if sql:
+            sql.path = str(historical)
+            if status == "delete_failed":
+                sql.business_id = None
+            session.commit()
+    if status == "delete_failed":
+        embedding.qdrant.delete_chunks_by_file_id(fid, ownership=record["tax_metadata"])
+
+    neighbor = upload(client, "session", "moved", text="Another upload with the same display name.")
+    url = f"/api/knowledge/files/{fid}"
+    assert client.delete(url, headers=ADMIN).status_code == 404
+    assert client.delete(url, headers=USER).status_code == 200
+    assert not current.exists() and historical.exists()
+    assert {r["file_id"] for r in client.get("/api/knowledge/files", headers=USER).json()["files"]} == {neighbor}
+    points, _ = embedding.qdrant.client.scroll(embedding.qdrant.COLLECTION_NAME)
+    assert {p.payload["file_id"] for p in points} == {neighbor}
+    assert {chunk.file_id for chunk in embedding.store.get_chunks()} == {neighbor}
+    if sql_id is not None:
+        with SessionLocal() as session:
+            assert session.get(KnowledgeFiles, sql_id) is None
+        assert KnowledgeChunkRepository().count_by_file_id(sql_id) == 0
+
+
+def test_delete_rejects_unrecognized_path_before_changing_index(document_app, tmp_path):
+    from pathlib import Path
+
+    _, client, service, embedding, _ = document_app
+    fid = upload(client)
+    record = service._kb._metadata["files"][0]
+    current = Path(record["file_path"])
+    outside = tmp_path / "outside" / "uploads" / "demo.md"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("unrelated", encoding="utf-8")
+    record["file_path"] = str(outside)
+    service._kb.save_metadata()
+    assert client.delete(f"/api/knowledge/files/{fid}", headers=USER).status_code == 500
+    assert current.exists() and outside.exists() and record["status"] == "active"
+    assert embedding.qdrant.client.count(embedding.qdrant.COLLECTION_NAME).count > 0
+
+
 def test_preset_deletion_keeps_source_and_disables_reimport(document_app, tmp_path):
     main, client, service, _, _ = document_app
     preset = tmp_path / "preset.md"
@@ -155,6 +289,67 @@ def test_preset_deletion_keeps_source_and_disables_reimport(document_app, tmp_pa
     assert client.delete(f"/api/knowledge/files/{result['file_id']}", headers=ADMIN).status_code == 200
     assert preset.exists()
     assert asyncio.run(service.ingest_preset_file(str(preset)))["skipped"] is True
+
+
+def test_policy_delete_and_confirmed_reset_keep_personal_and_unrelated_data(document_app, tmp_path, monkeypatch):
+    from database.repositories import KnowledgeFileRepository
+    from knowledge.policy_updater import LocalDirectorySource, PolicyTracker, PolicyUpdater
+    from qdrant_client.models import PointStruct
+
+    main, client, service, embedding, _ = document_app
+    data = tmp_path / "data"
+    updater = PolicyUpdater(str(tmp_path / "policy.sqlite"), kb_work_dir=str(data / "kb"), kb_id="tax_policy")
+    monkeypatch.setattr(main, "policy_updater", updater)
+    sources = data / "policies"
+    sources.mkdir()
+    source_path = sources / "system.md"
+    source_path.write_text("System input tax evidence", encoding="utf-8")
+    item = LocalDirectorySource(str(sources)).scan()[0]
+    file_id = updater.tracker.ingest_file_id(item)
+    updater.tracker.upsert_pending(item)
+    updater.tracker.mark_ingested(item.unique_key, file_id)
+    kb = service._policy_kb()
+    kb._embedding_service = embedding
+    assert asyncio.run(kb.ingest_file(str(source_path), file_id=file_id, source_type="default", scope="system"))["status"] == "success"
+    repo = KnowledgeFileRepository()
+    repo.create(str(source_path), business_id=file_id)
+    personal = upload(client)
+    uploaded_policy = upload(client, scope="system", headers=ADMIN)
+    assert file_id in {f["file_id"] for f in client.get("/api/knowledge/files?include_system=true", headers=ADMIN).json()["files"]}
+    assert client.delete(f"/api/knowledge/files/{file_id}", headers=USER).status_code == 404
+    assert client.delete(f"/api/knowledge/files/{personal}", headers=ADMIN).status_code == 404
+    assert client.delete(f"/api/knowledge/files/{file_id}", headers=ADMIN).status_code == 200
+    assert not source_path.exists()
+    assert file_id not in {f["file_id"] for f in asyncio.run(service._policy_kb().list_files())}
+    assert all(r.business_id != file_id for r in repo.get_all())
+    assert updater.tracker.upsert_pending(item) == (False, False)
+
+    cloud = embedding.qdrant
+    def point(index, fid, source_type):
+        return PointStruct(id=index, vector=[1., 0., 0., 0.], payload={"file_id":fid, "source_type":source_type, "content":"evidence"})
+    cloud.client.upsert(cloud.COLLECTION_NAME, [point(1, "cloud-policy", "default"), point(2, "unrelated", "other")])
+    path = "/api/policy/library/reset"
+    assert client.post(path + "-preview", headers=USER).status_code == 403
+    preview = client.post(path + "-preview", headers=ADMIN).json()
+    assert {f["file_id"] for f in preview["files"]} == {"cloud-policy", uploaded_policy}
+    assert client.post(path, headers=ADMIN, json={"preview_token":preview["preview_token"]}).status_code == 422
+    body = {"preview_token":preview["preview_token"], "confirmation":"重置系统政策库"}
+    cloud.client.upsert(cloud.COLLECTION_NAME, [point(3, "new-policy", "default")])
+    assert client.post(path, headers=ADMIN, json=body).status_code == 409
+    preview = client.post(path + "-preview", headers=ADMIN).json()
+    body["preview_token"] = preview["preview_token"]
+    result = client.post(path, headers=ADMIN, json=body).json()
+    assert result["success"] and set(result["deleted"]) == {"cloud-policy", "new-policy", uploaded_policy}, result
+    assert client.post(path, headers=ADMIN, json=body).status_code == 409
+    points, _ = cloud.client.scroll(cloud.COLLECTION_NAME)
+    assert {p.payload["file_id"] for p in points} == {personal, "unrelated"}
+    restored = PolicyTracker(str(tmp_path / "policy.sqlite"))
+    try:
+        assert restored.is_paused()
+        assert restored.upsert_pending(item) == (False, False)
+    finally:
+        restored.close()
+        updater.tracker.close()
 
 
 def test_real_orchestrator_emits_tokens_before_finishing(tmp_path, monkeypatch):
