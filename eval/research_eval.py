@@ -60,12 +60,14 @@ class SmokeModel:
     def invoke(self, messages, **kwargs):
         instruction = messages[0].content
         payload = json.loads(messages[-1].content)
-        if '"title": "Understanding"' in instruction:
-            result = {"facts":[], "unknowns":["模拟执行未进行业务事实核验"], "questions":[payload['query'][:500]]}
-        elif '"title": "ResearchPlan"' in instruction:
+        if instruction.startswith("输出类型：Understanding\n"):
+            result = {"facts":[], "unknowns":["模拟执行未进行业务事实核验"], "questions":[payload['original_query'][:500]]}
+        elif instruction.startswith("输出类型：ResearchPlan\n"):
             result = {"steps":[{"step_id":"s1", "question":next(iter(payload['questions'].values())) if isinstance(payload['questions'], dict) else payload['questions'][0], "depends_on":[]}]}
-        elif '"title": "Assessment"' in instruction:
+        elif instruction.startswith("输出类型：Assessment\n"):
             result = {"coverage":[], "next_queries":[]}
+        elif instruction.startswith("输出类型：ReferenceAnalysis\n"):
+            result = {"analysis": "模拟流程。仍需核对业务事实和政策依据。"}
         else:
             result = {"scope":"替身流程测试", "analysis":[], "uncertainties":["未进行真实模型研究"],
                       "follow_up_questions":[], "answer_draft":"这是流程替身输出，不是税务研究答案。"}

@@ -15,12 +15,15 @@ POLICY_METADATA_FIELDS = (
 
 
 def official_url(url):
+    if not isinstance(url, str) or any(c.isspace() or c == "\\" for c in url):
+        return False
     try:
-        parsed = urlparse(url or "")
+        parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
+        port = parsed.port
     except ValueError:
         return False
-    if parsed.username or parsed.password:
+    if parsed.username is not None or parsed.password is not None or port not in (None, 80, 443):
         return False
     return parsed.scheme in ("http", "https") and any(
         host == root or host.endswith("." + root) for root in ("chinatax.gov.cn", "mof.gov.cn", "gov.cn"))
@@ -108,7 +111,31 @@ def compact_evidence(evidence, focus=""):
         yield {**{key: record.get(key) for key in keys}, "content": content}
 
 
-EVIDENCE_GAP_CODES = {"insufficient_evidence", "policy_source_unverified"}
+def assessment_evidence(records, focus):
+    """Number short, source-bound passages so the assessor can select IDs."""
+    counter = 0
+    for record in compact_evidence(records, focus):
+        passages = {}
+        seen = set()
+        for sentence in re.split(r"\n\[… \]\n|(?<=[。；！？])", record.pop("content")):
+            quote = sentence.strip()
+            key = "".join(quote.split())
+            if len(key) < 6 or key in seen:
+                continue
+            seen.add(key)
+            counter += 1
+            passages[f"p{counter}"] = quote
+        if passages:
+            yield {**record, "passages": passages}
+
+
+def traceable_evidence(record):
+    """A readable official URL or an uploaded policy with an exact stored file ID."""
+    return bool(record.get("content") and (official_url(record.get("source_url"))
+                or (record.get("kind") == "policy_rag" and record.get("file_id"))))
+
+
+EVIDENCE_GAP_CODES = {"insufficient_evidence", "policy_source_unverified", "policy_original_unavailable"}
 
 
 def legacy_failed_report(data):

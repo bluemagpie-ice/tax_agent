@@ -241,7 +241,12 @@ def _bing_rss_search(query: str, limit: int = 5) -> list[dict]:
             if urlparse(item.findtext("link", "")).scheme in ("http", "https")][:limit]
 
 
-def read_web_page(url: str, max_chars: int = 10000, *, official_only: bool = False, require_article: bool = False) -> dict:
+class PolicyOriginalUnavailable(ValueError):
+    pass
+
+
+def read_web_page(url: str, max_chars: int = 10000, *, official_only: bool = False,
+                  require_article: bool = False, national_only: bool = True) -> dict:
     """读取公开网页正文；校验每次跳转、限制大小，失败返回可见的结构化错误。"""
     from bs4 import BeautifulSoup
     from urllib.parse import urljoin
@@ -251,7 +256,7 @@ def read_web_page(url: str, max_chars: int = 10000, *, official_only: bool = Fal
     try:
         for _ in range(4):
             parsed = urlparse(url)
-            if require_article and not _national_policy_site(url):
+            if require_article and national_only and not _national_policy_site(url):
                 raise ValueError("政策原文读取只接受全国性政策官网及其官方跳转")
             if official_only and not official_url(url):
                 raise ValueError("政策原文读取只接受官方站点及其官方跳转")
@@ -286,7 +291,7 @@ def read_web_page(url: str, max_chars: int = 10000, *, official_only: bool = Fal
                         pdf = PdfReader(BytesIO(content))
                         text = "\n".join(page.extract_text() or "" for page in pdf.pages[:12])
                     except (PdfReadError, ValueError) as exc:
-                        raise ValueError("官方 PDF 附件正文读取失败") from exc
+                            raise PolicyOriginalUnavailable("官方 PDF 附件未取得可读取正文") from exc
                     title = next((line.strip() for line in text.splitlines() if len(line.strip()) >= 6), "官方政策附件")
                     metadata["truncated"] = len(pdf.pages) > 12
                 else:
@@ -326,10 +331,10 @@ def read_web_page(url: str, max_chars: int = 10000, *, official_only: bool = Fal
                     if require_article:
                         body = next((node for selector in (
                             ".arc_cont", ".TRS_Editor", "#fontzoom", "#zoom", "#artibody", ".article-content",
-                            ".xxgk_content", ".Custom_UnionStyle", "article",
+                            ".xxgk_content", ".Custom_UnionStyle", ".contentLeft", "article",
                         ) if (node := soup.select_one(selector)) is not None), None)
                         if body is None:
-                            raise ValueError("未找到政策正文容器，页面可能是栏目、验证页或动态加载页")
+                            raise PolicyOriginalUnavailable("未找到政策正文，页面可能是栏目、验证页或动态加载页")
                     else:
                         body = (soup.select_one(".TRS_Editor, .contentLeft, #zoom, #artibody, .article-content")
                                 if official_only else None) or soup.select_one("article, main, #content") or soup.body or soup
@@ -356,13 +361,15 @@ def read_web_page(url: str, max_chars: int = 10000, *, official_only: bool = Fal
                     if effective:
                         metadata["effective_date"] = re.sub(r"\s+", "", effective.group(1))
                 if not text or (require_article and (len(text.strip()) < 30 or text.strip() == title)):
-                    raise ValueError("网页没有可读取正文，可能需要登录或动态加载")
+                    raise PolicyOriginalUnavailable("网页没有可读取正文，可能需要登录或动态加载")
                 return {**metadata, "status": "success", "url": url, "title": title, "content": text[:max_chars],
                         "truncated": len(text) > max_chars or metadata.get("truncated", False)}
         raise ValueError("网页跳转次数过多")
     except (requests.RequestException, ValueError, OSError, KeyError) as exc:
         logger.warning("网页读取失败（%s）", type(exc).__name__)
-        return {"status": "error", "url": url, "content": "", "message": str(exc) if isinstance(exc, ValueError) else "网页读取失败，请检查网络或链接"}
+        return {"status": "error", "url": url, "content": "",
+                "error_code": "no_original" if isinstance(exc, PolicyOriginalUnavailable) else "read_failed",
+                "message": str(exc) if isinstance(exc, ValueError) else "网页读取失败，请检查网络或链接"}
 
 
 def search_web_policy(
@@ -410,7 +417,8 @@ def search_web_policy(
     return deduped
 
 
-def search_official_research(query: str, limit: int = 2, *, by_title: bool = False, policy_only: bool = False) -> list[dict]:
+def search_official_research(query: str, limit: int = 2, *, by_title: bool = False,
+                             policy_only: bool = False, rank_titles: bool = False) -> list[dict]:
     """Use the public search endpoint used by the STA policy library page."""
     from bs4 import BeautifulSoup
     from services.research_evidence import official_url
@@ -421,12 +429,19 @@ def search_official_research(query: str, limit: int = 2, *, by_title: bool = Fal
         params.update(column="政策法规", wordPlace=1, type=0)
     elif policy_only:
         params.update(column="政策法规", type=0)
+    elif rank_titles:
+        params["pageSize"] = 10
     response = requests.get("https://www.chinatax.gov.cn/search5/search/s",
                             headers={**_SEARCH_HEADERS, "Referer": "https://fgk.chinatax.gov.cn/"},
                             params=params, timeout=(3, 6), allow_redirects=False)
     response.raise_for_status()
+    if response.status_code != 200:
+        raise ValueError("税务总局搜索返回意外状态")
+    rows = response.json()["searchResultAll"]["searchTotal"]
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("税务总局搜索结果格式不正确")
     results = []
-    for row in response.json()["searchResultAll"]["searchTotal"]:
+    for row in rows:
         url = row.get("url") or ""
         if not official_url(url):
             continue
@@ -445,6 +460,13 @@ def search_official_research(query: str, limit: int = 2, *, by_title: bool = Fal
         results = [item for item in results if title_key(query) in title_key(item["title"])]
     elif policy_only:
         results.sort(key=lambda item: title_key(query) not in title_key(item["title"]))
+    elif rank_titles:
+        phrase = title_key(query)
+        terms = {key for term in query.split() if len(key := title_key(term)) > 1}
+        results.sort(key=lambda item: (phrase in (title := title_key(item["title"])),
+                                       sum(term in title for term in terms)), reverse=True)
+        for rank, item in enumerate(results, 1):
+            item["rank"] = rank
     return results[:limit]
 
 def _national_policy_site(url: str) -> bool:

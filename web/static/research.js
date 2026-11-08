@@ -2,11 +2,12 @@
 (() => {
     'use strict';
     const el = id => document.getElementById(id);
-    let task = null, controller = null, busy = false, timer = null, statusAt = Date.now();
+    let task = null, controller = null, busy = false, timer = null, statusAt = null, progressView = null;
     const stages = {created:'待开始', understand:'提取业务事实', retrieve:'检索政策', report:'整理研究报告',
+        update_facts:'处理补充事实',
         cases:'比较历史案例', plan:'制定研究计划', assess:'核查研究证据', calculate:'核对计算条件', supplement:'补充研究', prepare_clarification:'等待补充事实',
         finalized:'已确认定稿', awaiting_review:'等待报告复核', awaiting_facts:'等待补充事实', failed:'执行失败',
-        insufficient_evidence:'证据不足', interrupted:'执行已停止，可恢复'};
+        insufficient_evidence:'证据不足', reference_analysis:'未经核验的参考性分析', interrupted:'执行已停止，可恢复'};
     const node = (tag, text, parent) => { const n = document.createElement(tag); n.textContent = text; if(parent) parent.append(n); return n; };
     let fieldId=0;
     function field(parent,title,value='',multiline=true) {
@@ -60,48 +61,100 @@
     function renderStatus() {
         const label=task.status === 'running' ? stages[task.stage] || '正在运行' : stages[task.status] || stages[task.stage] || task.status;
         const activity=task.activity ? ' · ' + task.activity : '';
-        el('research-status').textContent=label + activity + ' · 已用 ' + Math.floor(((task.elapsed_ms || 0) + (busy ? Date.now()-statusAt : 0))/1000) + ' 秒 · 任务 ' + task.task_id.slice(0,8);
+        const live=controller && busy && task.status === 'running' && statusAt !== null ? Math.max(0, Date.now()-statusAt) : 0;
+        const seconds=ms => Math.floor((ms+live)/1000) + ' 秒';
+        const current=Number.isFinite(task.run_elapsed_ms) ? ' · 本轮 ' + seconds(task.run_elapsed_ms) : '';
+        el('research-status').textContent=label + activity + current + ' · 累计 ' + seconds(task.elapsed_ms || 0) + ' · 任务 ' + task.task_id.slice(0,8);
     }
-    function render() {
+    function renderProgress() {
+        if(!progressView) return;
+        const facts=task.facts || [], pending=task.skip_unknowns && !task.kept_unknowns ? [] : task.unknowns || [];
+        const unknown=task.kept_unknowns || (task.skip_unknowns ? task.unknowns : []) || [];
+        const questions=task.questions || [], coverage=task.assessment?.coverage || [];
+        const count=task.question_count ?? questions.length;
+        const assessing=task.assessment_started ?? task.stage === 'assess';
+        const phase=assessing ? task.status === 'running' ? '正在核查证据' : '证据核查尚未完成' : '尚未开始证据核查';
+        const signature=JSON.stringify([facts,pending,unknown,questions,coverage,count,phase]);
+        if(progressView.signature === signature) return;
+        progressView.signature=signature;
+        progressView.replaceChildren();
+        if(facts.length || pending.length || unknown.length) {
+            const details=node('details','',progressView);
+            details.open=task.status === 'awaiting_facts';
+            node('summary',`业务事实 · 已确认 ${facts.length} 项 · 待确认 ${pending.length} 项 · 保留未知 ${unknown.length} 项`,details);
+            for(const [label,items] of [['已确认（用户提供）',facts],['待确认',pending],['保留未知',unknown]]) {
+                if(items.length) node('p',label+'\n'+items.map(item => '• '+item).join('\n'),details);
+            }
+        }
+        if(count) {
+            const details=node('details','',progressView);
+            node('summary',coverage.length ? `初步证据已覆盖 ${coverage.filter(item => item.sufficient).length}/${count} 个子问题（仍需人工核验）`
+                : `已识别 ${count} 个研究子问题，${phase}`,details).id='research-coverage-count';
+            if(coverage.length) {
+                for(const item of coverage) node('p',item.question + ' · ' + (item.sufficient ? '已有初步依据' : item.gap || '仍需补检'),details);
+            } else {
+                for(const question of questions) node('p',question,details);
+            }
+        }
+    }
+    function render(replyDraft='') {
         const result=el('research-result'); result.replaceChildren();
         el('research-run').hidden=!task || ['finalized','awaiting_review','awaiting_facts'].includes(task.status);
-        if(!task) {el('research-status').textContent='创建研究任务后，进度和报告会保存在当前用户下。'; return;}
+        if(!task) {progressView=null; el('research-status').textContent='创建研究任务后，进度和报告会保存在当前用户下。'; return;}
         renderStatus();
         el('research-run').textContent=task.resume_stage || task.status === 'interrupted' ? '从已保存步骤恢复'
-            : ['failed','insufficient_evidence'].includes(task.status) ? '重新研究（从头执行）' : '开始研究';
-        const questionCount=task.question_count ?? task.questions?.length;
-        if(questionCount) node('p',`初步证据已覆盖 ${task.completed_questions || 0}/${questionCount} 个子问题（仍需人工核验）`,result).id='research-coverage-count';
+            : ['failed','insufficient_evidence','reference_analysis'].includes(task.status) ? '重新研究（从头执行）' : '开始研究';
+        progressView=node('div','',result); renderProgress();
         if(task.failure) {
             node('h3',task.status === 'insufficient_evidence' ? '现有证据不足以生成可复核报告' : '尚未生成可复核报告',result);
             node('p',task.failure.message,result);
             const refs=task.failure.details?.unmatched_citations || task.failure.details?.validation?.unmatched_citations;
             if(refs?.length) node('p','未匹配的引用：'+refs.join('、'),result);
-            node('p',task.resume_stage ? '已保留证据，可从失败步骤恢复。' : '重新研究将从头执行并重新检索。',result);
+            node('p',task.resume_stage ? '已保存研究进度，可从中断的步骤继续。' : '重新研究将从头执行并重新检索。',result);
         }
         if(task.status === 'awaiting_facts') {
-            node('h3','待确认事实',result);
-            node('p',task.unknowns.join('\n'),result);
             const label=node('label','补充信息',result), reply=node('textarea','',result);
-            reply.id='research-fact-reply'; label.htmlFor=reply.id;
+            reply.id='research-fact-reply'; label.htmlFor=reply.id; reply.value=replyDraft;
             const send=node('button','补充并继续',result), skip=node('button','保留未知并继续',result);
             const clarify=skipUnknowns => action(() => run({action:'clarify',reply:reply.value,skip_unknowns:skipUnknowns}));
             send.onclick=() => clarify(false); skip.onclick=() => clarify(true);
         }
-        if(task.candidates?.length || task.assessment?.coverage?.length) {
+        if(task.candidates?.length || task.metrics?.tool_calls?.length) {
             const details=node('details','',result);
-            node('summary','检索与证据覆盖详情',details);
+            node('summary','检索与原文读取详情',details);
             node('p',`读取候选摘录 ${task.candidates?.length || 0} 条，其中 ${task.evidence?.length || 0} 条与子问题关联。`,details);
-            for(const item of task.assessment?.coverage || []) {
-                node('p',item.question + ' · ' + (item.sufficient ? '已有初步依据' : item.gap || '仍需补检'),details);
+            const tools={search_tax_policy:'本地政策检索',search_web_policy:'官网搜索',read_web_page:'官网原文读取'};
+            const outcomes={empty:'无结果',error:'请求失败',no_original:'未取得原文',success:'成功'};
+            for(const call of task.metrics?.tool_calls || []) {
+                if(tools[call.tool] && outcomes[call.status]) {
+                    const duration=Number.isFinite(call.latency_ms) ? ' · '+(call.latency_ms/1000).toFixed(1)+' 秒' : '';
+                    node('p',tools[call.tool]+' · '+outcomes[call.status]+duration,details);
+                }
             }
         }
         if(task.trace?.some(item => Number.isFinite(item.elapsed_ms))) {
             const timings=node('details','',result); node('summary','已完成步骤与耗时',timings);
+            if(task.run_timing) node('p',`本轮数据库操作 ${task.run_timing.store_ms} 毫秒 · 检查点载入 ${task.run_timing.checkpoint_load_ms} 毫秒`,timings);
             for(const item of task.trace.filter(item => Number.isFinite(item.elapsed_ms))) {
-                node('p',`${stages[item.stage] || item.stage} · ${(item.elapsed_ms/1000).toFixed(1)} 秒`,timings);
+                const run=item.run_id && item.run_id === task.run_id ? '本轮' : '历史';
+                const calls=(task.metrics?.llm_calls || []).filter(call => call.run_id === item.run_id && call.step_id === item.step_id && item.step_id);
+                const breakdown=calls.map(call => {
+                    const label=['output_empty','output_truncated'].includes(call.retry_kind) ? '重新生成'
+                        : call.retry_kind === 'citation' ? '引用修正' : call.schema_repair ? '格式修正' : '首次模型调用';
+                    return label+' '+((call.latency_ms || 0)/1000).toFixed(1)+' 秒';
+                });
+                node('p',`${run} · ${stages[item.stage] || item.stage} · ${(item.elapsed_ms/1000).toFixed(1)} 秒`+
+                    (breakdown.length ? '\n'+breakdown.join('，') : ''),timings);
             }
         }
         if(task.status !== 'running') renderTaskDeletion(result);
+        if(task.status === 'reference_analysis' && task.reference_analysis) {
+            const reference=task.reference_analysis;
+            node('h3',reference.notice,result); node('p',reference.analysis,result);
+            for(const [title,items] of [['待核实事实',reference.unknown_facts],['待核实政策依据',reference.policy_gaps]]) {
+                if(items?.length) {node('h4',title,result); node('p',items.join('\n'),result);}
+            }
+        }
         if(!task.report) return;
         const report=task.report;
         node('h3',`研究报告 · 第 ${task.report_version} 版`,result); node('p',report.notice,result);
@@ -214,14 +267,19 @@
     async function action(fn) {
         if(busy) return;
         const auth=TaxAuth.snapshot();
-        setBusy(true); el('research-error').textContent=''; statusAt=Date.now();
+        setBusy(true); el('research-error').textContent=''; statusAt=null;
         if(typeof setInterval === 'function') timer=setInterval(() => {if(task) renderStatus();},1000);
         try {await fn();}
         catch(error) {
             if(auth !== TaxAuth.snapshot()) return;
             el('research-error').textContent=error.name === 'AbortError' ? '执行已停止，正在读取保存状态。' : error.message;
             if(task) {
-                try { task=await (await api(`/tasks/${task.task_id}`)).json(); render(); await list(); }
+                const draft=el('research-fact-reply')?.value, round=task.clarification_rounds;
+                try {
+                    task=await (await api(`/tasks/${task.task_id}`)).json();
+                    render(task.clarification_rounds === round ? draft : '');
+                    await list();
+                }
                 catch { if(auth === TaxAuth.snapshot()) el('research-error').textContent+=' 无法读取保存状态，请稍后刷新。'; }
             }
         }
@@ -230,10 +288,12 @@
     async function run(operation={}) {
         controller=new AbortController();
         const id=task.task_id;
+        const auth=TaxAuth.snapshot();
         const response=await api(`/tasks/${id}/stream`,{revision:task.revision,...operation},controller.signal);
         const reader=response.body.getReader(), decoder=new TextDecoder(); let buffer='', terminal=false;
         while(true) {
             const {done,value}=await reader.read(); if(done) break;
+            if(auth !== TaxAuth.snapshot()) return;
             buffer+=decoder.decode(value,{stream:true}); let end;
             while((end=buffer.indexOf('\n\n')) >= 0) {
                 const frame=buffer.slice(0,end); buffer=buffer.slice(end+2);
@@ -242,17 +302,13 @@
                 const event=JSON.parse(line.slice(6));
                 if(event.type==='status') {
                     task={...task,activity:'',...event}; statusAt=Date.now();
-                    renderStatus();
-                    if(event.question_count) {
-                        const count=el('research-coverage-count') || node('p','',el('research-result'));
-                        count.id='research-coverage-count';
-                        count.textContent=`初步证据已覆盖 ${event.completed_questions}/${event.question_count} 个子问题（仍需人工核验）`;
-                    }
+                    renderStatus(); renderProgress();
                 }
                 if(event.type==='error') throw new Error(event.message);
                 if(event.type==='done') {terminal=true; task=event.task; render(); await list();}
             }
         }
+        if(auth !== TaxAuth.snapshot()) return;
         if(!terminal) {
             task=await (await api(`/tasks/${id}`)).json(); render();
             throw new Error('研究连接已中断，已读取保存的任务状态。');
@@ -304,7 +360,8 @@
         if(!input.value.trim() || input.value.length > 16000) {input.setAttribute('aria-invalid','true'); input.focus(); throw new Error('请输入不超过16000字的研究问题。');}
         input.removeAttribute('aria-invalid');
         el('research-status').textContent='正在创建研究任务…';
-        task=await (await api('/tasks',{query:el('research-query').value,web_search:el('research-web').checked})).json(); render(); await run();
+        task=await (await api('/tasks',{query:el('research-query').value,web_search:el('research-web').checked,
+            allow_reference_analysis:!!el('research-reference')?.checked})).json(); render(); await run();
     });};
     el('research-task-list').onchange=() => action(async () => {const id=el('research-task-list').value; task=id ? await (await api(`/tasks/${id}`)).json() : null; render();});
     function mode(research) {

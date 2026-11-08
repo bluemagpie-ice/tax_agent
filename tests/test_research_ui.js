@@ -83,5 +83,25 @@ const findButton=text=>get('research-result').querySelectorAll('button').find(b=
     assert.match(get('research-status').textContent,/42 秒/);
     assert.equal(get('research-run').textContent,'从已保存步骤恢复');
     context.fetch=normalFetch;
-    console.log('PASS: Research mode, SSE, case lifecycle, task deletion defaults and identity reset (DOM substitutes)');
+    current={...current,status:'awaiting_facts',stage:'prepare_clarification',elapsed_ms:42000,run_elapsed_ms:6000,
+        facts:['用于办公'],unknowns:['何时投入使用？'],kept_unknowns:['入账原值'],questions:['如何折旧？','何时起算？']};
+    context.window.taxResearchActions.refresh(); await settle();
+    assert.match(get('research-result').textContent,/已确认 1 项 · 待确认 1 项 · 保留未知 1 项/);
+    assert.match(get('research-result').textContent,/已识别 2 个研究子问题，尚未开始证据核查/);
+    assert.doesNotMatch(get('research-result').textContent,/初步证据已覆盖/);
+    assert.match(get('research-status').textContent,/本轮 6 秒 · 累计 42 秒/);
+    current={...current,status:'failed',stage:'report',assessment:{coverage:[
+        {question:'如何折旧？',sufficient:true},{question:'何时起算？',sufficient:false,gap:'缺少适用期间'}]}};
+    context.window.taxResearchActions.refresh(); await settle();
+    assert.match(get('research-result').textContent,/初步证据已覆盖 1\/2 个子问题/);
+    get('research-reference').checked=true;
+    get('research-query').value='参考分析';get('research-form').onsubmit({preventDefault(){}});await settle();
+    assert.equal(calls.filter(c=>c.url==='/api/research/tasks' && c.body).at(-1).body.allow_reference_analysis,true);
+    current={...current,status:'reference_analysis',report:null,reference_analysis:{notice:'未经政策原文充分核验',
+        analysis:'先核对业务条件',unknown_facts:['启用日期'],policy_gaps:['适用期间']}};
+    context.window.taxResearchActions.refresh(); await settle();
+    assert.match(get('research-result').textContent,/未经政策原文充分核验/);
+    assert.match(get('research-result').textContent,/待核实政策依据/);
+    assert.equal(findButton('确认此版本定稿'),undefined);
+    console.log('PASS: Research mode, SSE, case lifecycle, reference analysis and identity reset (DOM substitutes)');
 })().catch(error=>{console.error(error);process.exitCode=1;});

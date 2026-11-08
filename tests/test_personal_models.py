@@ -138,7 +138,8 @@ def test_research_stream_uses_rotated_personal_key_and_selected_model(tmp_path, 
     def provider(self, request):
         payload = json.loads(request.read())
         seen.append((payload["model"], request.headers["Authorization"]))
-        assert '"title": "Understanding"' in payload["messages"][0]["content"]
+        assert payload["messages"][0]["content"].startswith("输出类型：Understanding\n")
+        assert "response_format" not in payload
         output = {"facts": [], "questions": ["需核对"], "unknowns": ["所在地待确认 " + rotated]}
         return httpx.Response(200, json={"model": payload["model"], "choices": [
             {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": json.dumps(output)}},

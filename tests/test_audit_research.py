@@ -10,7 +10,7 @@ from services.policy_validity import period_status
 from services.research_evidence import normalize_evidence
 from services.research_store import ResearchStore
 from services.security import tenant_scope
-from tests.test_research import POLICY, ScriptedModel, understanding, covered, report
+from tests.test_research import POLICY, ScriptedModel, assess_covered, understanding, covered, report
 
 
 @pytest.mark.parametrize("quote,status", [
@@ -61,7 +61,7 @@ def test_model_timeout_can_resume_assessment_without_retrieval(tmp_path, monkeyp
                 assert failed["failure"]["code"] == "model_call_failed"
                 assert failed["resume_stage"] == "assess"
                 ids = [e["evidence_id"] for e in failed["candidates"]]
-                agent._llm = ScriptedModel([covered(), report()])
+                agent._llm = ScriptedModel([assess_covered, report()])
                 resumed = await agent.execute(task["task_id"], failed["revision"])
                 assert resumed["status"] == "awaiting_review"
                 assert [e["evidence_id"] for e in resumed["candidates"]] == ids

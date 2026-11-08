@@ -16,6 +16,7 @@ class CreateResearch(BaseModel):
     query: str = Field(min_length=1, max_length=16000)
     web_search: bool = False
     use_cases: bool = True
+    allow_reference_analysis: bool = False
 
 
 class RunResearch(BaseModel):
@@ -83,6 +84,8 @@ def build_router(auth, service):
             raise HTTPException(404, str(exc)) from exc
 
     def visible(task):
+        if "pending_report" in task:
+            task = {k: value for k, value in task.items() if k != "pending_report"}
         if task["status"] == "failed" and (task.get("failure") or {}).get("code") in EVIDENCE_GAP_CODES:
             return {**task, "status": "insufficient_evidence"}
         if not legacy_failed_report(task):
@@ -97,7 +100,8 @@ def build_router(auth, service):
     async def create(body: CreateResearch):
         if not body.query.strip():
             raise HTTPException(422, "请输入研究问题")
-        return service().store.create(body.query.strip(), web_search=body.web_search, use_cases=body.use_cases)
+        return service().store.create(body.query.strip(), web_search=body.web_search, use_cases=body.use_cases,
+                                      allow_reference_analysis=body.allow_reference_analysis)
 
     @router.get("/tasks")
     async def listing():

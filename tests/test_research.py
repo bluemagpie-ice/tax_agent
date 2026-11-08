@@ -48,13 +48,21 @@ def covered():
                           "evidence_ids":[evidence_id], "excerpts":{evidence_id:POLICY["content"]}}]}
 
 
+def assess_covered(messages):
+    evidence = next(json.loads(message.content)["evidence"] for message in messages
+                    if message.content.startswith('{"evidence":'))
+    qid = next(iter(json.loads(messages[-1].content)["questions"]))
+    return {"coverage": [{"question_id": qid, "sufficient": True,
+                          "passage_ids": [next(iter(evidence["passages"]))]}]}
+
+
 def test_research_end_to_end_restart_review_and_isolation(tmp_path):
     async def verify():
         store = ResearchStore(create_engine(f"sqlite:///{tmp_path / 'business.sqlite'}"))
         with tenant_scope("alice"):
             task = store.create("模拟业务需要研究", web_search=False, budget={"clarifications":0})
             async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "graph.sqlite")) as saver:
-                agent = ResearchAgent(store, llm=ScriptedModel([understanding(), covered(), report()]),
+                agent = ResearchAgent(store, llm=ScriptedModel([understanding(), assess_covered, report()]),
                                       search=lambda *a, **k: [POLICY], workdir_root=tmp_path)
                 agent._checkpointer = saver
                 result = await agent.execute(task["task_id"], task["revision"])
@@ -104,7 +112,7 @@ def test_fact_skip_review_edit_and_stale_version(tmp_path):
             store = ResearchStore(create_engine(f"sqlite:///{tmp_path / 'facts.sqlite'}"))
             task = store.create("模拟业务研究")
             async with AsyncSqliteSaver.from_conn_string(str(tmp_path / 'facts-graph.sqlite')) as saver:
-                agent = ResearchAgent(store, llm=ScriptedModel([understanding(), covered(), report()]),
+                agent = ResearchAgent(store, llm=ScriptedModel([understanding(), assess_covered, report()]),
                                       search=lambda *a, **k: [POLICY], workdir_root=tmp_path)
                 agent._checkpointer = saver
                 task = await agent.execute(task['task_id'], task['revision'])
@@ -141,8 +149,7 @@ def test_retrieval_replans_once_and_stops_on_no_new_evidence(tmp_path):
             store = ResearchStore(create_engine(f"sqlite:///{tmp_path / 'repeat.sqlite'}"))
             task = store.create('模拟业务', budget={'clarifications':0})
             gap = {'coverage':[], 'next_queries':['补查模拟业务']}
-            plan = {'steps':[{'step_id':'extra','question':'补查模拟业务','depends_on':[]}]}
-            responses = [understanding(),gap,plan]
+            responses = [understanding(), gap]
             async with AsyncSqliteSaver.from_conn_string(str(tmp_path / 'repeat-graph.sqlite')) as saver:
                 agent = ResearchAgent(store,llm=ScriptedModel(responses),search=lambda *a,**k:[POLICY],workdir_root=tmp_path)
                 agent._checkpointer=saver
@@ -150,6 +157,7 @@ def test_retrieval_replans_once_and_stops_on_no_new_evidence(tmp_path):
                 assert result['research_rounds'] == 2 and result['replans'] == 1
                 assert result['stop_reason'] == 'no_new_evidence'
                 assert result['failure']['code'] == 'insufficient_evidence'
+                assert len(result['metrics']['llm_calls']) == 2
     asyncio.run(verify())
 
 
@@ -208,8 +216,8 @@ def test_first_research_saved_case_second_research_revalidates_policy(tmp_path):
             def search(query,**kwargs):
                 searches.append(query)
                 return [POLICY]
-            responses=[understanding(),covered(),report(),understanding(),
-                       {'steps':[{'step_id':'q1','question':'核对模拟业务政策','depends_on':[]}]},covered(),report()]
+            responses=[understanding(),assess_covered,report(),understanding(),
+                       {'steps':[{'step_id':'q1','question':'核对模拟业务政策','depends_on':[]}]},assess_covered,report()]
             async with AsyncSqliteSaver.from_conn_string(str(tmp_path / 'demo-graph.sqlite')) as saver:
                 agent=ResearchAgent(store,llm=ScriptedModel(responses),search=search,workdir_root=tmp_path)
                 agent._checkpointer=saver
@@ -252,7 +260,7 @@ def test_invalid_model_json_repair_is_bounded_and_counted(tmp_path):
         data=await agent.understand({'query':'模拟业务'})
         assert data['facts'] == ['模拟业务'] and len(data['metrics']['llm_calls']) == 2
         assert usage_summary(data)['retry_count'] == 1
-        assert data['metrics']['llm_calls'][0]['error_type'] == 'ValidationError'
+        assert data['metrics']['llm_calls'][0]['outcome'] == 'output_json_invalid'
     asyncio.run(verify())
 
 
@@ -276,9 +284,7 @@ def test_dated_core_evidence_rejects_old_policy_and_ignores_unrelated_candidates
         content = "本模拟办法自2023年1月1日起施行。模拟业务规则仅用于测试。"
         # A start in 2023 alone does not prove expiry in 2026. Test known expiry.
         old = {**POLICY, "content": content, "is_current": False}
-        eid = normalize_evidence(old)["evidence_id"]
-        assessment = {"coverage": [{"question_id":"q1", "evidence_ids":[eid], "sufficient":True,
-                                    "excerpts":{eid:content}, "period_excerpts":{eid:content}}]}
+        assessment = {"coverage": [{"question_id":"q1", "passage_ids":["p2"], "period_ids":["p1"], "sufficient":True}]}
         with tenant_scope("alice"):
             task = store.create("模拟业务", budget={"clarifications":0})
             async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "old-graph.sqlite")) as saver:
@@ -302,8 +308,8 @@ def test_repeated_unsupported_citation_has_no_report_version(tmp_path):
         with tenant_scope("alice"):
             task = store.create("模拟业务", budget={"clarifications":0})
             async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "bad-graph.sqlite")) as saver:
-                agent = ResearchAgent(store, llm=ScriptedModel([understanding(), covered(), bad, bad,
-                                                               understanding(), covered(), report()]),
+                agent = ResearchAgent(store, llm=ScriptedModel([understanding(), assess_covered, bad, bad,
+                                                               understanding(), assess_covered, report()]),
                                       search=lambda *a, **k: [POLICY], workdir_root=tmp_path)
                 agent._checkpointer = saver
                 result = await agent.execute(task["task_id"], task["revision"])
@@ -341,7 +347,7 @@ def test_actual_sse_api_and_versioned_confirmation(tmp_path):
     from fastapi.testclient import TestClient
     from web.research_routes import build_router
     store=ResearchStore(create_engine(f"sqlite:///{tmp_path / 'stream.sqlite'}",connect_args={'check_same_thread':False}))
-    agent=ResearchAgent(store,llm=ScriptedModel([understanding(),covered(),report()]),search=lambda *a,**k: [POLICY],workdir_root=tmp_path)
+    agent=ResearchAgent(store,llm=ScriptedModel([understanding(),assess_covered,report()]),search=lambda *a,**k: [POLICY],workdir_root=tmp_path)
     @asynccontextmanager
     async def lifespan(app):
         async with AsyncSqliteSaver.from_conn_string(str(tmp_path / 'stream-graph.sqlite')) as saver:

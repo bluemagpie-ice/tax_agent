@@ -1,0 +1,296 @@
+{
+  "version": 1,
+  "source": "业务 SQLite 和检查点 SQLite 只读查询。缺字段代表原记录未保存。",
+  "cases": {
+    "c5022f56": {
+      "original_query": "我公司是一家科技制造企业，想问一下，在10月份预缴申报时，如何享受研发费用加计扣除优惠？",
+      "web_search": true,
+      "use_cases": true,
+      "status": "failed",
+      "stage": "assess",
+      "model_id": "deepseek-flash",
+      "failure": {
+        "code": "structured_output_invalid",
+        "message": "模型输出达到长度上限，可从当前步骤恢复",
+        "stage": "assess",
+        "details": {
+          "output_error": "output_truncated",
+          "schema": "Assessment",
+          "validation_issues": [],
+          "previous_output_error": "output_truncated"
+        }
+      },
+      "resume_stage": "assess",
+      "elapsed_ms": 50525,
+      "clarification_rounds": 1,
+      "user_clarification": "10月份预缴申报所属的纳税年度为2025年",
+      "recorded_unknowns_at_failure": [],
+      "stage_trace": [
+        {
+          "stage": "understand",
+          "elapsed_ms": 3403,
+          "outcome": "failed"
+        },
+        {
+          "stage": "understand",
+          "elapsed_ms": 1901,
+          "outcome": "completed"
+        },
+        {
+          "stage": "prepare_clarification",
+          "elapsed_ms": 0,
+          "outcome": "completed"
+        },
+        {
+          "stage": "update_facts",
+          "elapsed_ms": 834,
+          "outcome": "completed"
+        },
+        {
+          "stage": "cases",
+          "elapsed_ms": 2,
+          "outcome": "completed"
+        },
+        {
+          "stage": "plan",
+          "elapsed_ms": 9277,
+          "outcome": "completed"
+        },
+        {
+          "stage": "retrieve",
+          "elapsed_ms": 7130,
+          "outcome": "completed"
+        },
+        {
+          "stage": "calculate",
+          "elapsed_ms": 0,
+          "outcome": "completed"
+        },
+        {
+          "stage": "assess",
+          "elapsed_ms": 27182,
+          "outcome": "failed"
+        }
+      ],
+      "model_calls": [
+        {
+          "purpose": "Understanding",
+          "stage": "understand",
+          "latency_ms": 1863,
+          "outcome": "output_schema_invalid",
+          "finish_reason": "stop",
+          "output_limit": 768,
+          "retry_kind": null
+        },
+        {
+          "purpose": "Understanding",
+          "stage": "understand",
+          "latency_ms": 1201,
+          "outcome": "output_schema_invalid",
+          "finish_reason": "stop",
+          "output_limit": 768,
+          "retry_kind": "output_schema_invalid"
+        },
+        {
+          "purpose": "Understanding",
+          "stage": "understand",
+          "latency_ms": 1572,
+          "outcome": "success",
+          "finish_reason": "stop",
+          "output_limit": 768,
+          "retry_kind": null
+        },
+        {
+          "purpose": "ClarificationUpdate",
+          "stage": "update_facts",
+          "latency_ms": 831,
+          "outcome": "success",
+          "finish_reason": "stop",
+          "output_limit": 768,
+          "retry_kind": null
+        },
+        {
+          "purpose": "ResearchPlan",
+          "stage": "plan",
+          "latency_ms": 9271,
+          "outcome": "success",
+          "finish_reason": "stop",
+          "output_limit": 1536,
+          "retry_kind": null
+        },
+        {
+          "purpose": "Assessment",
+          "stage": "assess",
+          "latency_ms": 10265,
+          "outcome": "output_truncated",
+          "finish_reason": "length",
+          "output_limit": 1536,
+          "retry_kind": null
+        },
+        {
+          "purpose": "Assessment",
+          "stage": "assess",
+          "latency_ms": 16886,
+          "outcome": "output_truncated",
+          "finish_reason": "length",
+          "output_limit": 2730,
+          "retry_kind": "output_truncated"
+        }
+      ],
+      "tool_calls": [
+        {
+          "tool": "search_research_cases",
+          "stage": "cases",
+          "status": "success",
+          "latency_ms": 1
+        },
+        {
+          "tool": "search_tax_policy",
+          "stage": "retrieve",
+          "status": "empty",
+          "latency_ms": 1211
+        },
+        {
+          "tool": "search_web_policy",
+          "stage": "retrieve",
+          "status": "success",
+          "latency_ms": 954
+        },
+        {
+          "tool": "read_web_page",
+          "stage": "retrieve",
+          "status": "success",
+          "latency_ms": 537
+        },
+        {
+          "tool": "read_web_page",
+          "stage": "retrieve",
+          "status": "success",
+          "latency_ms": 378
+        },
+        {
+          "tool": "search_tax_policy",
+          "stage": "retrieve",
+          "status": "empty",
+          "latency_ms": 1222
+        },
+        {
+          "tool": "search_web_policy",
+          "stage": "retrieve",
+          "status": "success",
+          "latency_ms": 649
+        },
+        {
+          "tool": "search_tax_policy",
+          "stage": "retrieve",
+          "status": "empty",
+          "latency_ms": 1201
+        },
+        {
+          "tool": "search_web_policy",
+          "stage": "retrieve",
+          "status": "success",
+          "latency_ms": 872
+        },
+        {
+          "tool": "read_web_page",
+          "stage": "retrieve",
+          "status": "success",
+          "latency_ms": 581
+        },
+        {
+          "tool": "read_web_page",
+          "stage": "retrieve",
+          "status": "success",
+          "latency_ms": 814
+        },
+        {
+          "tool": "search_tax_policy",
+          "stage": "retrieve",
+          "status": "empty",
+          "latency_ms": 1173
+        }
+      ],
+      "report_versions": 0,
+      "checkpoint_rows": 14,
+      "not_recoverable": [
+        "当时的个人案例库可见快照",
+        "当时的 Qdrant 内容快照",
+        "各次执行间的人工等待耗时"
+      ]
+    },
+    "63a5912f": {
+      "original_query": "我们企业买了一套二手房，想问一下，该如何计提折旧？",
+      "web_search": true,
+      "use_cases": true,
+      "status": "failed",
+      "stage": "understand",
+      "model_id": "deepseek-flash",
+      "failure": {
+        "code": "structured_output_invalid",
+        "message": "模型两次未返回有效结构化内容",
+        "details": {}
+      },
+      "resume_stage": "understand",
+      "elapsed_ms": 63380,
+      "clarification_rounds": 1,
+      "user_clarification": "二手房购入后是自用办公",
+      "recorded_unknowns_at_failure": [
+        "该二手房购入后是自用办公、生产经营、出租还是闲置？",
+        "该二手房何时购入并投入使用？",
+        "该二手房的入账原值是多少？"
+      ],
+      "stage_trace": [
+        {
+          "stage": "understand",
+          "elapsed_ms": 31443
+        },
+        {
+          "stage": "prepare_clarification",
+          "elapsed_ms": 0
+        },
+        {
+          "stage": "understand",
+          "elapsed_ms": 31432
+        }
+      ],
+      "model_calls": [
+        {
+          "purpose": "Understanding",
+          "latency_ms": 12438,
+          "error_type": "ValidationError",
+          "current_parser_outcome": "output_schema_invalid",
+          "list_fields_received_as_objects": ["facts", "unknowns"]
+        },
+        {
+          "purpose": "Understanding",
+          "latency_ms": 18994,
+          "current_parser_outcome": "success"
+        },
+        {
+          "purpose": "Understanding",
+          "latency_ms": 23471,
+          "error_type": "ResearchFailure",
+          "current_parser_outcome": "output_schema_invalid",
+          "list_fields_received_as_objects": ["facts", "unknowns", "tax_types"]
+        },
+        {
+          "purpose": "Understanding",
+          "latency_ms": 7948,
+          "error_type": "ResearchFailure",
+          "current_parser_outcome": "output_schema_invalid",
+          "list_fields_received_as_objects": ["facts", "unknowns", "tax_types"]
+        }
+      ],
+      "tool_calls": [],
+      "report_versions": 0,
+      "checkpoint_rows": 6,
+      "not_recoverable": [
+        "各次模型调用的结束原因和输出上限",
+        "房屋购入及投入使用时间",
+        "入账原值",
+        "当时的个人案例库和 Qdrant 内容快照"
+      ]
+    }
+  }
+}

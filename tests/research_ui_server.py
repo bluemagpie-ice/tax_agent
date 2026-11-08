@@ -47,18 +47,20 @@ class UIModel(SmokeModel):
         time.sleep(0.35)
         schema = messages[0].content
         payload = json.loads(messages[-1].content)
+        if schema.startswith("输出类型：ClarificationUpdate\n"):
+            return AIMessage(content=json.dumps({"facts": [payload["reply"]], "answered": ["f1"],
+                                                  "kept_unknown": [], "needs_reanalysis": False}))
         result = json.loads(super().invoke(messages, **kwargs).content)
         if 'facts' in result:
-            query = payload['query']
+            query = payload.get('conversation', payload['original_query'])
             result['facts'] = ['模拟资料'] if '模拟资料' in query else []
-        elif '"title": "Assessment"' in schema and '无证据' not in str(payload['questions']):
+        elif schema.startswith("输出类型：Assessment\n") and '无证据' not in str(payload['questions']):
             evidence = next((json.loads(m.content)['evidence'] for m in messages[1:-1]
                              if m.content.startswith('{"evidence":')), None)
             if evidence:
-                eid = evidence['evidence_id']
-                result['coverage'] = [{'question_id':'q1', 'evidence_ids':[eid], 'sufficient':True,
-                                       'excerpts':{eid:evidence['content'][:24]}}]
-        elif '"title": "ResearchReport"' in schema:
+                result['coverage'] = [{'question_id':'q1', 'passage_ids':[next(iter(evidence['passages']))],
+                                       'sufficient':True}]
+        elif schema.startswith("输出类型：ResearchReport\n"):
             match = next(item for item in payload['coverage'] if item['sufficient'])
             result['analysis'] = [{'question':match['question'], 'evidence_ids':match['evidence_ids'],
                                    'finding':'这是界面流程的模拟分析。'}]
